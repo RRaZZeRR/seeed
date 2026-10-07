@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Seed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;700&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+/* Одна колонка-инструмент: генерация → шифрование → отправка; расшифровка ниже */
+:root{
+  --bg:#eef1f0; --panel:#ffffff; --fg:#17201e; --muted:#5d6b68; --line:#d3dbd9;
+  --accent:#0f7a68; --accent-fg:#ffffff; --warn:#a34a12; --warn-bg:#fbeee3; --ok:#1f7a3a;
+  --sans:"Onest",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#101615; --panel:#18211f; --fg:#e4ecea; --muted:#93a39f; --line:#2a3633;
+  --accent:#3fc2a8; --accent-fg:#06211c; --warn:#f0a36a; --warn-bg:#2b1d12; --ok:#6bd48a; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#101615; --panel:#18211f; --fg:#e4ecea; --muted:#93a39f; --line:#2a3633;
+  --accent:#3fc2a8; --accent-fg:#06211c; --warn:#f0a36a; --warn-bg:#2b1d12; --ok:#6bd48a; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font:15px/1.5 var(--sans);padding-inline:16px;padding-block:20px 40px}
+main{max-width:520px;margin:0 auto;display:grid;gap:18px}
+h1{font-size:22px;margin:0;text-wrap:balance}
+.sub{color:var(--muted);margin:2px 0 0;font-size:14px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px;display:grid;gap:12px;min-width:0}
+h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0;font-weight:500}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{border:0;background:transparent;color:var(--fg);padding:9px 14px;font:500 14px var(--sans);cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-fg)}
+button.btn{border:1px solid var(--line);background:transparent;color:var(--fg);padding:11px 14px;border-radius:8px;font:500 15px var(--sans);cursor:pointer}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg);flex:1}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button:disabled{opacity:.45;cursor:not-allowed}
+.words{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;font-family:var(--mono);font-size:14px;counter-reset:w}
+.words span{border:1px solid var(--line);border-radius:6px;padding:6px 6px;display:flex;gap:6px;min-width:0;overflow-wrap:anywhere}
+.words span::before{counter-increment:w;content:counter(w);color:var(--muted);font-size:11px;min-width:1.4em;text-align:right;font-variant-numeric:tabular-nums;padding-top:2px}
+.words.blur span{filter:blur(6px)}
+.empty{color:var(--muted);font-size:14px}
+label{font-size:13px;color:var(--muted);display:grid;gap:4px}
+input,textarea{width:100%;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:10px;font:15px var(--sans)}
+textarea{font:13px var(--mono);min-height:84px;resize:vertical}
+.out{font:12px var(--mono);background:var(--bg);border:1px dashed var(--line);border-radius:8px;padding:10px;overflow-wrap:anywhere}
+.msg{font-size:14px;min-height:1.2em}
+.msg.err{color:var(--warn)} .msg.ok{color:var(--ok)}
+.note{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:10px 12px;font-size:13px}
+a.tg{display:block;text-align:center;text-decoration:none;background:var(--accent);color:var(--accent-fg);padding:11px 14px;border-radius:8px;font-weight:500}
+@media (prefers-reduced-motion:no-preference){.words span{transition:filter .15s}}
+</style>
+</head>
+<body>
+
+
+<main>
+  <header>
+    <h1>Сид-генератор</h1>
+    <p class="sub">BIP39, английский словарь, как в SafePal. Фраза создаётся в этом браузере и никуда не отправляется в открытом виде.</p>
+  </header>
+
+  <section aria-labelledby="g">
+    <h2 id="g">1. Новая фраза</h2>
+    <div class="row">
+      <div class="seg" role="group" aria-label="Количество слов">
+        <button id="n12" aria-pressed="true">12 слов</button>
+        <button id="n24" aria-pressed="false">24 слова</button>
+      </div>
+      <button class="btn primary" id="gen">Создать</button>
+    </div>
+    <div id="words" class="words"><p class="empty">Нажмите «Создать» — появится новая фраза.</p></div>
+    <div class="row">
+      <button class="btn" id="copy" disabled>Копировать для SafePal</button>
+      <button class="btn" id="hide" disabled>Скрыть</button>
+    </div>
+    <div id="m1" class="msg" role="status"></div>
+  </section>
+
+  <section aria-labelledby="e">
+    <h2 id="e">2. Зашифровать и в Telegram</h2>
+    <label>Название (видно в Telegram)
+      <input id="label" placeholder="например: Кошелёк 7" autocomplete="off">
+    </label>
+    <label>Пароль шифрования (запомните, без него сид не восстановить)
+      <input id="pw" type="password" autocomplete="new-password">
+    </label>
+    <label style="display:flex;gap:8px;align-items:center;color:var(--fg)"><input id="rem" type="checkbox" style="width:auto"> Запомнить пароль на этом телефоне</label>
+    <button class="btn primary" id="enc" disabled>Зашифровать</button>
+    <div id="encBox" hidden>
+      <div class="out" id="cipher"></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="copyC">Копировать шифр</button>
+      </div>
+      <a class="tg" id="tg" href="#" target="_blank" rel="noopener" style="margin-top:8px">Отправить в Telegram</a>
+      <p class="sub">Откроется Telegram с выбором чата — выберите «Избранное». Если не открылся, скопируйте шифр и вставьте вручную.</p>
+    </div>
+    <div id="m2" class="msg" role="status"></div>
+  </section>
+
+  <section aria-labelledby="d">
+    <h2 id="d">Расшифровать из Telegram</h2>
+    <label>Шифр (строка, начинается с SP1:)
+      <textarea id="dIn" spellcheck="false"></textarea>
+    </label>
+    <label>Пароль
+      <input id="dPw" type="password" autocomplete="current-password">
+    </label>
+    <button class="btn primary" id="dec">Расшифровать</button>
+    <div id="dWords" class="words" hidden></div>
+    <div id="m3" class="msg" role="status"></div>
+  </section>
+
+  <p class="note">Используйте длинный пароль (от 12 символов) и не храните его в том же Telegram. Перед переводом крупных сумм проверьте расшифровку одной фразы.</p>
+</main>
+
+<script>
+const WL = "abandon ability able about above absent absorb abstract absurd abuse access accident account accuse achieve acid acoustic acquire across act action actor actress actual adapt add addict address adjust admit adult advance advice aerobic affair afford afraid again age agent agree ahead aim air airport aisle alarm album alcohol alert alien all alley allow almost alone alpha already also alter always amateur amazing among amount amused analyst anchor ancient anger angle angry animal ankle announce annual another answer antenna antique anxiety any apart apology appear apple approve april arch arctic area arena argue arm armed armor army around arrange arrest arrive arrow art artefact artist artwork ask aspect assault asset assist assume asthma athlete atom attack attend attitude attract auction audit august aunt author auto autumn average avocado avoid awake aware away awesome awful awkward axis baby bachelor bacon badge bag balance balcony ball bamboo banana banner bar barely bargain barrel base basic basket battle beach bean beauty because become beef before begin behave behind believe below belt bench benefit best betray better between beyond bicycle bid bike bind biology bird birth bitter black blade blame blanket blast bleak bless blind blood blossom blouse blue blur blush board boat body boil bomb bone bonus book boost border boring borrow boss bottom bounce box boy bracket brain brand brass brave bread breeze brick bridge brief bright bring brisk broccoli broken bronze broom brother brown brush bubble buddy budget buffalo build bulb bulk bullet bundle bunker burden burger burst bus business busy butter buyer buzz cabbage cabin cable cactus cage cake call calm camera camp can canal cancel candy cannon canoe canvas canyon capable capital captain car carbon card cargo carpet carry cart case cash casino castle casual cat catalog catch category cattle caught cause caution cave ceiling celery cement census century cereal certain chair chalk champion change chaos chapter charge chase chat cheap check cheese chef cherry chest chicken chief child chimney choice choose chronic chuckle chunk churn cigar cinnamon circle citizen city civil claim clap clarify claw clay clean clerk clever click client cliff climb clinic clip clock clog close cloth cloud clown club clump cluster clutch coach coast coconut code coffee coil coin collect color column combine come comfort comic common company concert conduct confirm congress connect consider control convince cook cool copper copy coral core corn correct cost cotton couch country couple course cousin cover coyote crack cradle craft cram crane crash crater crawl crazy cream credit creek crew cricket crime crisp critic crop cross crouch crowd crucial cruel cruise crumble crunch crush cry crystal cube culture cup cupboard curious current curtain curve cushion custom cute cycle dad damage damp dance danger daring dash daughter dawn day deal debate debris decade december decide decline decorate decrease deer defense define defy degree delay deliver demand demise denial dentist deny depart depend deposit depth deputy derive describe desert design desk despair destroy detail detect develop device devote diagram dial diamond diary dice diesel diet differ digital dignity dilemma dinner dinosaur direct dirt disagree discover disease dish dismiss disorder display distance divert divide divorce dizzy doctor document dog doll dolphin domain donate donkey donor door dose double dove draft dragon drama drastic draw dream dress drift drill drink drip drive drop drum dry duck dumb dune during dust dutch duty dwarf dynamic eager eagle early earn earth easily east easy echo ecology economy edge edit educate effort egg eight either elbow elder electric elegant element elephant elevator elite else embark embody embrace emerge emotion employ empower empty enable enact end endless endorse enemy energy enforce engage engine enhance enjoy enlist enough enrich enroll ensure enter entire entry envelope episode equal equip era erase erode erosion error erupt escape essay essence estate eternal ethics evidence evil evoke evolve exact example excess exchange excite exclude excuse execute exercise exhaust exhibit exile exist exit exotic expand expect expire explain expose express extend extra eye eyebrow fabric face faculty fade faint faith fall false fame family famous fan fancy fantasy farm fashion fat fatal father fatigue fault favorite feature february federal fee feed feel female fence festival fetch fever few fiber fiction field figure file film filter final find fine finger finish fire firm first fiscal fish fit fitness fix flag flame flash flat flavor flee flight flip float flock floor flower fluid flush fly foam focus fog foil fold follow food foot force forest forget fork fortune forum forward fossil foster found fox fragile frame frequent fresh friend fringe frog front frost frown frozen fruit fuel fun funny furnace fury future gadget gain galaxy gallery game gap garage garbage garden garlic garment gas gasp gate gather gauge gaze general genius genre gentle genuine gesture ghost giant gift giggle ginger giraffe girl give glad glance glare glass glide glimpse globe gloom glory glove glow glue goat goddess gold good goose gorilla gospel gossip govern gown grab grace grain grant grape grass gravity great green grid grief grit grocery group grow grunt guard guess guide guilt guitar gun gym habit hair half hammer hamster hand happy harbor hard harsh harvest hat have hawk hazard head health heart heavy hedgehog height hello helmet help hen hero hidden high hill hint hip hire history hobby hockey hold hole holiday hollow home honey hood hope horn horror horse hospital host hotel hour hover hub huge human humble humor hundred hungry hunt hurdle hurry hurt husband hybrid ice icon idea identify idle ignore ill illegal illness image imitate immense immune impact impose improve impulse inch include income increase index indicate indoor industry infant inflict inform inhale inherit initial inject injury inmate inner innocent input inquiry insane insect inside inspire install intact interest into invest invite involve iron island isolate issue item ivory jacket jaguar jar jazz jealous jeans jelly jewel job join joke journey joy judge juice jump jungle junior junk just kangaroo keen keep ketchup key kick kid kidney kind kingdom kiss kit kitchen kite kitten kiwi knee knife knock know lab label labor ladder lady lake lamp language laptop large later latin laugh laundry lava law lawn lawsuit layer lazy leader leaf learn leave lecture left leg legal legend leisure lemon lend length lens leopard lesson letter level liar liberty library license life lift light like limb limit link lion liquid list little live lizard load loan lobster local lock logic lonely long loop lottery loud lounge love loyal lucky luggage lumber lunar lunch luxury lyrics machine mad magic magnet maid mail main major make mammal man manage mandate mango mansion manual maple marble march margin marine market marriage mask mass master match material math matrix matter maximum maze meadow mean measure meat mechanic medal media melody melt member memory mention menu mercy merge merit merry mesh message metal method middle midnight milk million mimic mind minimum minor minute miracle mirror misery miss mistake mix mixed mixture mobile model modify mom moment monitor monkey monster month moon moral more morning mosquito mother motion motor mountain mouse move movie much muffin mule multiply muscle museum mushroom music must mutual myself mystery myth naive name napkin narrow nasty nation nature near neck need negative neglect neither nephew nerve nest net network neutral never news next nice night noble noise nominee noodle normal north nose notable note nothing notice novel now nuclear number nurse nut oak obey object oblige obscure observe obtain obvious occur ocean october odor off offer office often oil okay old olive olympic omit once one onion online only open opera opinion oppose option orange orbit orchard order ordinary organ orient original orphan ostrich other outdoor outer output outside oval oven over own owner oxygen oyster ozone pact paddle page pair palace palm panda panel panic panther paper parade parent park parrot party pass patch path patient patrol pattern pause pave payment peace peanut pear peasant pelican pen penalty pencil people pepper perfect permit person pet phone photo phrase physical piano picnic picture piece pig pigeon pill pilot pink pioneer pipe pistol pitch pizza place planet plastic plate play please pledge pluck plug plunge poem poet point polar pole police pond pony pool popular portion position possible post potato pottery poverty powder power practice praise predict prefer prepare present pretty prevent price pride primary print priority prison private prize problem process produce profit program project promote proof property prosper protect proud provide public pudding pull pulp pulse pumpkin punch pupil puppy purchase purity purpose purse push put puzzle pyramid quality quantum quarter question quick quit quiz quote rabbit raccoon race rack radar radio rail rain raise rally ramp ranch random range rapid rare rate rather raven raw razor ready real reason rebel rebuild recall receive recipe record recycle reduce reflect reform refuse region regret regular reject relax release relief rely remain remember remind remove render renew rent reopen repair repeat replace report require rescue resemble resist resource response result retire retreat return reunion reveal review reward rhythm rib ribbon rice rich ride ridge rifle right rigid ring riot ripple risk ritual rival river road roast robot robust rocket romance roof rookie room rose rotate rough round route royal rubber rude rug rule run runway rural sad saddle sadness safe sail salad salmon salon salt salute same sample sand satisfy satoshi sauce sausage save say scale scan scare scatter scene scheme school science scissors scorpion scout scrap screen script scrub sea search season seat second secret section security seed seek segment select sell seminar senior sense sentence series service session settle setup seven shadow shaft shallow share shed shell sheriff shield shift shine ship shiver shock shoe shoot shop short shoulder shove shrimp shrug shuffle shy sibling sick side siege sight sign silent silk silly silver similar simple since sing siren sister situate six size skate sketch ski skill skin skirt skull slab slam sleep slender slice slide slight slim slogan slot slow slush small smart smile smoke smooth snack snake snap sniff snow soap soccer social sock soda soft solar soldier solid solution solve someone song soon sorry sort soul sound soup source south space spare spatial spawn speak special speed spell spend sphere spice spider spike spin spirit split spoil sponsor spoon sport spot spray spread spring spy square squeeze squirrel stable stadium staff stage stairs stamp stand start state stay steak steel stem step stereo stick still sting stock stomach stone stool story stove strategy street strike strong struggle student stuff stumble style subject submit subway success such sudden suffer sugar suggest suit summer sun sunny sunset super supply supreme sure surface surge surprise surround survey suspect sustain swallow swamp swap swarm swear sweet swift swim swing switch sword symbol symptom syrup system table tackle tag tail talent talk tank tape target task taste tattoo taxi teach team tell ten tenant tennis tent term test text thank that theme then theory there they thing this thought three thrive throw thumb thunder ticket tide tiger tilt timber time tiny tip tired tissue title toast tobacco today toddler toe together toilet token tomato tomorrow tone tongue tonight tool tooth top topic topple torch tornado tortoise toss total tourist toward tower town toy track trade traffic tragic train transfer trap trash travel tray treat tree trend trial tribe trick trigger trim trip trophy trouble truck true truly trumpet trust truth try tube tuition tumble tuna tunnel turkey turn turtle twelve twenty twice twin twist two type typical ugly umbrella unable unaware uncle uncover under undo unfair unfold unhappy uniform unique unit universe unknown unlock until unusual unveil update upgrade uphold upon upper upset urban urge usage use used useful useless usual utility vacant vacuum vague valid valley valve van vanish vapor various vast vault vehicle velvet vendor venture venue verb verify version very vessel veteran viable vibrant vicious victory video view village vintage violin virtual virus visa visit visual vital vivid vocal voice void volcano volume vote voyage wage wagon wait walk wall walnut want warfare warm warrior wash wasp waste water wave way wealth weapon wear weasel weather web wedding weekend weird welcome west wet whale what wheat wheel when where whip whisper wide width wife wild will win window wine wing wink winner winter wire wisdom wise wish witness wolf woman wonder wood wool word work world worry worth wrap wreck wrestle wrist write wrong yard year yellow you young youth zebra zero zone zoo".split(" ");
+const $ = id => document.getElementById(id);
+let n = 12, current = null;
+const enc = new TextEncoder(), dec = new TextDecoder();
+
+function msg(el, t, cls){ el.textContent = t; el.className = "msg " + (cls||""); }
+function render(box, words){
+  box.innerHTML = "";
+  for (const w of words){ const s = document.createElement("span"); s.textContent = w; box.appendChild(s); }
+}
+function bits(bytes){ return [...bytes].map(b => b.toString(2).padStart(8,"0")).join(""); }
+
+async function entropyToMnemonic(ent){
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", ent));
+  const cs = ent.length * 8 / 32;
+  const b = bits(ent) + bits(h).slice(0, cs);
+  const out = [];
+  for (let i = 0; i < b.length; i += 11) out.push(WL[parseInt(b.slice(i, i+11), 2)]);
+  return out;
+}
+async function validMnemonic(words){
+  if (![12,15,18,21,24].includes(words.length)) return false;
+  const idx = words.map(w => WL.indexOf(w));
+  if (idx.includes(-1)) return false;
+  const b = idx.map(i => i.toString(2).padStart(11,"0")).join("");
+  const entBits = b.length * 32 / 33;
+  const ent = new Uint8Array(entBits/8);
+  for (let i = 0; i < ent.length; i++) ent[i] = parseInt(b.slice(i*8, i*8+8), 2);
+  const again = await entropyToMnemonic(ent);
+  return again.join(" ") === words.join(" ");
+}
+
+function setN(v){ n = v; $("n12").setAttribute("aria-pressed", v===12); $("n24").setAttribute("aria-pressed", v===24); }
+$("n12").onclick = () => setN(12);
+$("n24").onclick = () => setN(24);
+
+$("gen").onclick = async () => {
+  const ent = crypto.getRandomValues(new Uint8Array(n === 12 ? 16 : 32));
+  current = await entropyToMnemonic(ent);
+  render($("words"), current);
+  $("words").classList.remove("blur");
+  $("copy").disabled = $("hide").disabled = $("enc").disabled = false;
+  $("hide").textContent = "Скрыть";
+  $("encBox").hidden = true; msg($("m2"), "");
+  msg($("m1"), "Новая фраза из " + n + " слов готова.", "ok");
+  if ($("rem") && $("rem").checked && $("pw").value.length >= 8) $("enc").click();
+};
+$("hide").onclick = () => {
+  const b = $("words").classList.toggle("blur");
+  $("hide").textContent = b ? "Показать" : "Скрыть";
+};
+
+async function copyText(t, el, okText){
+  try { await navigator.clipboard.writeText(t); msg(el, okText, "ok"); }
+  catch(e){ msg(el, "Не удалось скопировать автоматически. Выделите текст и скопируйте вручную.", "err"); }
+}
+$("copy").onclick = () => current && copyText(current.join(" "), $("m1"), "Скопировано. Вставьте в SafePal → Импорт кошелька.");
+
+function b64(u8){ let s=""; for (const x of u8) s += String.fromCharCode(x); return btoa(s).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,""); }
+function unb64(s){ s = s.replace(/-/g,"+").replace(/_/g,"/"); while (s.length % 4) s += "="; return Uint8Array.from(atob(s), c => c.charCodeAt(0)); }
+async function key(pw, salt){
+  const base = await crypto.subtle.importKey("raw", enc.encode(pw), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({name:"PBKDF2", salt, iterations:600000, hash:"SHA-256"}, base, {name:"AES-GCM", length:256}, false, ["encrypt","decrypt"]);
+}
+
+$("enc").onclick = async () => {
+  const pw = $("pw").value;
+  if (!current) return;
+  if (pw.length < 8){ msg($("m2"), "Пароль слишком короткий: нужно минимум 8 символов, лучше 12+.", "err"); return; }
+  $("enc").disabled = true; msg($("m2"), "Шифрую…");
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM", iv}, await key(pw, salt), enc.encode(current.join(" "))));
+  const all = new Uint8Array(salt.length + iv.length + ct.length);
+  all.set(salt); all.set(iv, 16); all.set(ct, 28);
+  const c = "SP1:" + b64(all);
+  $("cipher").textContent = c;
+  const label = $("label").value.trim() || ("Сид " + new Date().toLocaleString("ru-RU"));
+  $("tg").href = "https://t.me/share/url?url=" + encodeURIComponent(c) + "&text=" + encodeURIComponent(label);
+  $("encBox").hidden = false; $("enc").disabled = false;
+  msg($("m2"), "Зашифровано. Теперь отправьте в Telegram.", "ok");
+};
+$("copyC").onclick = () => copyText($("cipher").textContent, $("m2"), "Шифр скопирован.");
+
+$("dec").onclick = async () => {
+  const raw = $("dIn").value.trim().match(/SP1:[A-Za-z0-9_-]+/);
+  $("dWords").hidden = true;
+  if (!raw){ msg($("m3"), "Не нашёл шифр: вставьте строку целиком, она начинается с SP1:", "err"); return; }
+  try {
+    const all = unb64(raw[0].slice(4));
+    const pt = await crypto.subtle.decrypt({name:"AES-GCM", iv:all.slice(16,28)}, await key($("dPw").value, all.slice(0,16)), all.slice(28));
+    const words = dec.decode(pt).split(" ");
+    render($("dWords"), words); $("dWords").hidden = false;
+    msg($("m3"), (await validMnemonic(words)) ? "Готово, контрольная сумма фразы верна." : "Расшифровано, но фраза не прошла проверку BIP39.", "ok");
+  } catch(e){ msg($("m3"), "Неверный пароль или шифр повреждён.", "err"); }
+};
+
+
+// --- Telegram + запоминание пароля ---
+const TG = window.Telegram && Telegram.WebApp && Telegram.WebApp.initData !== undefined ? Telegram.WebApp : null;
+if (TG){ try{ TG.ready(); TG.expand(); }catch(e){} }
+const LS="seed_pw";
+try{ const s=localStorage.getItem(LS); if(s){ $("pw").value=s; $("dPw").value=s; $("rem").checked=true; } }catch(e){}
+function savePw(){ try{ if($("rem").checked) localStorage.setItem(LS,$("pw").value); else localStorage.removeItem(LS); }catch(e){} }
+$("rem").onchange=savePw; $("pw").addEventListener("change",savePw);
+$("tg").addEventListener("click",e=>{
+  if(TG && TG.openTelegramLink){ e.preventDefault(); TG.openTelegramLink($("tg").href); }
+});
+
+// самопроверка на тест-векторе BIP39
+entropyToMnemonic(new Uint8Array(16)).then(w => {
+  if (w.join(" ") !== "abandon ".repeat(11) + "about"){ $("gen").disabled = true; msg($("m1"), "Ошибка самопроверки, генерация отключена.", "err"); }
+});
+</script>
+
+</body>
+</html>
