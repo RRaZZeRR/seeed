@@ -114,7 +114,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
     <details>
       <summary id="hd">Расшифровать строку SP1: вручную</summary>
       <div style="display:grid;gap:10px;margin-top:12px">
-        <textarea id="dIn" spellcheck="false" placeholder="Вставьте сообщение или строку SP1:…"></textarea>
+        <textarea id="dIn" spellcheck="false" autocapitalize="off" autocorrect="off" autocomplete="off" placeholder="Вставьте сообщение или строку SP1:…"></textarea>
         <button class="btn primary" id="dec">Расшифровать</button>
         <div id="dWords" class="words" hidden></div>
         <div id="dAddrs" class="addrs" hidden></div>
@@ -351,12 +351,12 @@ $("rem").onchange = savePw; $("pw").addEventListener("change", savePw);
 
 /* ---------- ручная расшифровка ---------- */
 $("dec").onclick = async () => {
-  const raw = $("dIn").value.match(/SP1:[A-Za-z0-9_-]+/);
+  const raw = $("dIn").value.replace(/\s+/g,"").match(/sp1:([A-Za-z0-9_-]+)/i);
   $("dWords").hidden = true; $("dAddrs").hidden = true;
   if (!raw){ msg($("m3"), "Не нашёл шифр: вставьте строку целиком, она начинается с SP1:", "err"); return; }
   if (!$("pw").value){ msg($("m3"), "Введите пароль в блоке «Пароль шифрования» вверху.", "err"); return; }
   try {
-    const words = await decrypt(raw[0], $("pw").value);
+    const words = await decrypt("SP1:" + raw[1], $("pw").value);
     renderWords($("dWords"), words);
     try { renderAddrs($("dAddrs"), SeedDerive.addresses(words.join(" ")), $("m3")); } catch(_){}
     msg($("m3"), (await validMnemonic(words)) ? "Готово, контрольная сумма фразы верна." : "Расшифровано, но фраза не прошла проверку BIP39.", "ok");
