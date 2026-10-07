@@ -357,7 +357,7 @@ function renderList(){
     };
     const cp = el("button","btn small","Копировать фразу");
     cp.onclick = () => { if (!needPw()) { msg(out, "Расшифровываю…"); copyLater(phrase(), out, "Фраза скопирована. Вставьте в SafePal → Импорт кошелька."); } };
-    const mk = el("button","btn small", w.imp ? "Снять отметку" : "✓ Импортирован");
+    const mk = el("button","btn small primary","✓ Импортирован");
     mk.onclick = async () => {
       w.imp = !w.imp;
       try { await saveWallet(w); renderList(); }
@@ -374,7 +374,8 @@ function renderList(){
       try { await store.del(w.k); wallets = wallets.filter(x => x.k !== w.k); renderList(); msg($("m2"), "Кошелёк удалён из списка. Сообщение в Telegram осталось.", "ok"); }
       catch(e){ msg(out, "Не получилось удалить, попробуйте ещё раз.", "err"); }
     };
-    row.append(sp, mk, show, cp, fw, del);
+    if (!w.imp) row.append(mk);
+    row.append(show, cp, del);
     card.append(head, bl, ad, row, words, out);
     box.appendChild(card);
   }
