@@ -61,6 +61,24 @@ textarea{font:13px var(--mono);min-height:84px;resize:vertical}
 .pill{font:500 11px var(--sans);letter-spacing:.04em;padding:2px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
 .note{background:var(--warn-bg);color:var(--warn);border-radius:8px;padding:10px 12px;font-size:13px;margin:0}
 details summary{cursor:pointer;color:var(--muted);font-size:14px}
+#count{text-transform:none;letter-spacing:0}
+.tools{display:grid;gap:8px}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:99px;padding:5px 12px;font:500 13px var(--sans);cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.badge{font:500 11px var(--sans);letter-spacing:.03em;padding:2px 8px;border-radius:99px;white-space:nowrap}
+.badge.done{background:var(--accent);color:var(--accent-fg)}
+.badge.todo{border:1px solid var(--line);color:var(--muted)}
+.whead .left{display:flex;gap:8px;align-items:center;flex-wrap:wrap;min-width:0}
+.primary.small{flex:0 0 auto}
+.balbar{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.balbar .sum{display:grid;gap:2px}
+.balbar .sum b{font:700 20px var(--sans);font-variant-numeric:tabular-nums}
+.balbar .sum small{color:var(--muted);font-size:12px}
+.bals{display:flex;flex-wrap:wrap;gap:6px}
+.bal{font:500 12px var(--mono);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-variant-numeric:tabular-nums;color:var(--muted)}
+.bal.pos{color:var(--fg);border-color:var(--accent)}
+.bal.usd{color:var(--fg)}
 </style>
 </head>
 <body>
@@ -102,6 +120,19 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
 
   <section aria-labelledby="hw">
     <h2 id="hw"><span>Мои кошельки</span><span id="count"></span></h2>
+    <div class="balbar" id="balbar" hidden>
+      <div class="sum"><small>Всего на кошельках</small><b id="total">—</b><small id="balTime">Балансы ещё не загружались</small></div>
+      <button class="btn small" id="balBtn">Обновить балансы</button>
+    </div>
+    <div class="tools" id="tools" hidden>
+      <input id="q" type="search" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Поиск по названию или адресу">
+      <div class="chips" role="group" aria-label="Фильтр">
+        <button class="chip" data-f="all" aria-pressed="true">Все</button>
+        <button class="chip" data-f="todo" aria-pressed="false">Не в SafePal</button>
+        <button class="chip" data-f="done" aria-pressed="false">В SafePal</button>
+        <button class="chip" data-f="funded" aria-pressed="false">С балансом</button>
+      </div>
+    </div>
     <div id="list" style="display:grid;gap:10px"><p class="empty">Загружаю…</p></div>
     <p id="m2" class="msg" role="status"></p>
   </section>
@@ -215,6 +246,29 @@ async function decrypt(c, pw){
 
 /* ---------- отображение ---------- */
 const NAMES = [["trx","USDT TRC20"],["btc","BTC"],["sol","SOL"]];
+async function copyLater(promise, out, ok){
+  try {
+    if (window.ClipboardItem && navigator.clipboard && navigator.clipboard.write){
+      await navigator.clipboard.write([new ClipboardItem({"text/plain": promise.then(s => new Blob([s], {type:"text/plain"}))})]);
+    } else { await navigator.clipboard.writeText(await promise); }
+    msg(out, ok, "ok"); return true;
+  } catch(e){
+    try { await promise; } catch(_){ msg(out, "Пароль не подходит к этому кошельку.", "err"); return false; }
+    msg(out, "Не удалось скопировать автоматически. Нажмите «Показать фразу» и скопируйте вручную.", "err"); return false;
+  }
+}
+async function saveWallet(w){
+  await store.set(w.k, JSON.stringify({label:w.label, t:w.t, a:w.a, c:w.c, imp:!!w.imp}));
+}
+let filter = "all";
+function matches(w, q){
+  if (filter === "todo" && w.imp) return false;
+  if (filter === "done" && !w.imp) return false;
+  if (filter === "funded"){ const b = bal.w[w.k]; if (!b || !["usdt","trx","btc","sol"].some(k => b[k] > 0)) return false; }
+  if (!q) return true;
+  q = q.toLowerCase();
+  return w.label.toLowerCase().includes(q) || Object.values(w.a).some(x => String(x).toLowerCase().includes(q));
+}
 async function copyText(t, out, ok){
   try { await navigator.clipboard.writeText(t); msg(out, ok, "ok"); }
   catch(e){ msg(out, "Не удалось скопировать автоматически. Выделите текст и скопируйте вручную.", "err"); }
@@ -237,16 +291,26 @@ function shareText(w){
 
 function renderList(){
   const box = $("list"); box.innerHTML = "";
-  $("count").textContent = wallets.length ? String(wallets.length) : "";
+  const done = wallets.filter(w => w.imp).length;
+  $("count").textContent = wallets.length ? (done + " из " + wallets.length + " в SafePal") : "";
+  $("tools").hidden = wallets.length < 2;
+  renderTotal();
   if (!wallets.length){
     box.appendChild(el("p","empty", "Пока пусто. Нажмите «Создать» — кошелёк сохранится здесь."));
     return;
   }
-  for (const w of wallets){
+  const q = $("q").value.trim();
+  const shown = wallets.filter(w => matches(w, q));
+  if (!shown.length){ box.appendChild(el("p","empty", q ? "Ничего не найдено по «" + q + "»." : "В этом фильтре кошельков нет.")); return; }
+  for (const w of shown){
     const card = el("article","wallet");
     const head = el("div","whead");
-    head.append(el("strong", null, w.label), el("small", null, fmtDate(w.t)));
+    const left = el("div","left");
+    const badge = el("span", "badge " + (w.imp ? "done" : "todo"), w.imp ? "✓ В SafePal" : "Не импортирован");
+    left.append(el("strong", null, w.label), badge);
+    head.append(left, el("small", null, fmtDate(w.t)));
     const ad = el("div","addrs"); renderAddrs(ad, w.a, $("m2"));
+    const bl = balChips(w);
     const words = el("div","words"); words.hidden = true;
     const out = el("p","msg");
     const row = el("div","row");
@@ -260,10 +324,23 @@ function renderList(){
       catch(e){ msg(out, "Пароль не подходит к этому кошельку.", "err"); }
       show.disabled = false;
     };
+    const needPw = () => { if (!$("pw").value){ msg(out, "Введите пароль в блоке «Пароль шифрования» вверху.", "err"); return true; } return false; };
+    const phrase = () => decrypt(w.c, $("pw").value).then(ws => ws.join(" "));
+    const sp = el("button","btn small primary","Открыть в SafePal");
+    sp.onclick = async () => {
+      if (needPw()) return;
+      msg(out, "Расшифровываю…");
+      const ok = await copyLater(phrase(), out, "Фраза скопирована. В SafePal: «+» → Импорт кошелька → Фраза восстановления → Вставить.");
+      if (!ok) return;
+      openSafePal(out);
+    };
     const cp = el("button","btn small","Копировать фразу");
-    cp.onclick = async () => {
-      try { const ws = await decrypt(w.c, $("pw").value); copyText(ws.join(" "), out, "Фраза скопирована. Вставьте в SafePal → Импорт кошелька."); }
-      catch(e){ msg(out, "Пароль не подходит к этому кошельку.", "err"); }
+    cp.onclick = () => { if (!needPw()) { msg(out, "Расшифровываю…"); copyLater(phrase(), out, "Фраза скопирована. Вставьте в SafePal → Импорт кошелька."); } };
+    const mk = el("button","btn small", w.imp ? "Снять отметку" : "✓ Импортирован");
+    mk.onclick = async () => {
+      w.imp = !w.imp;
+      try { await saveWallet(w); renderList(); }
+      catch(e){ w.imp = !w.imp; msg(out, "Не удалось сохранить отметку, попробуйте ещё раз.", "err"); }
     };
     const fw = el("button","btn small","В чат");
     fw.onclick = () => {
@@ -276,11 +353,114 @@ function renderList(){
       try { await store.del(w.k); wallets = wallets.filter(x => x.k !== w.k); renderList(); msg($("m2"), "Кошелёк удалён из списка. Сообщение в Telegram осталось.", "ok"); }
       catch(e){ msg(out, "Не получилось удалить, попробуйте ещё раз.", "err"); }
     };
-    row.append(show, cp, fw, del);
-    card.append(head, ad, row, words, out);
+    row.append(sp, mk, show, cp, fw, del);
+    card.append(head, bl, ad, row, words, out);
     box.appendChild(card);
   }
 }
+
+/* ---------- балансы ---------- */
+const USDT_TRC20 = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
+const LS_BAL = "seed_bal" + UID;
+let bal = {w:{}, px:null, t:0};
+try { const s = JSON.parse(localStorage.getItem(LS_BAL)); if (s && s.w) bal = s; } catch(e){}
+function saveBal(){ try { localStorage.setItem(LS_BAL, JSON.stringify(bal)); } catch(e){} }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function getJSON(url, opt){
+  const r = await fetch(url, Object.assign({cache:"no-store"}, opt||{}));
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+async function balTron(addr){
+  const j = await getJSON("https://api.trongrid.io/v1/accounts/" + addr);
+  if (!j.data || !j.data.length) return {usdt:0, trx:0};
+  const d = j.data[0]; let usdt = 0;
+  for (const o of (d.trc20 || [])) if (o[USDT_TRC20] != null) usdt = Number(o[USDT_TRC20]) / 1e6;
+  return {usdt, trx: (d.balance || 0) / 1e6};
+}
+async function firstOk(fns){ let last; for (const f of fns){ try { return await f(); } catch(e){ last = e; } } throw last; }
+async function balBtc(addr){
+  const j = await firstOk([() => getJSON("https://mempool.space/api/address/" + addr), () => getJSON("https://blockstream.info/api/address/" + addr)]);
+  const c = j.chain_stats, m = j.mempool_stats;
+  return (c.funded_txo_sum - c.spent_txo_sum + m.funded_txo_sum - m.spent_txo_sum) / 1e8;
+}
+async function balSol(addr){
+  const opt = {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({jsonrpc:"2.0", id:1, method:"getBalance", params:[addr]})};
+  const j = await firstOk([() => getJSON("https://api.mainnet-beta.solana.com", opt), () => getJSON("https://solana-rpc.publicnode.com", opt)]);
+  if (!j.result) throw new Error("rpc");
+  return j.result.value / 1e9;
+}
+async function prices(){
+  const j = await getJSON("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,solana,tron&vs_currencies=usd");
+  return {btc: j.bitcoin.usd, sol: j.solana.usd, trx: j.tron.usd, usdt: 1};
+}
+function usdOf(b){
+  if (!b || !bal.px) return null;
+  let s = 0;
+  for (const k of ["usdt","trx","btc","sol"]) if (typeof b[k] === "number") s += b[k] * (bal.px[k] || 0);
+  return s;
+}
+const fmtUsd = v => "$" + v.toLocaleString("en-US", {minimumFractionDigits:2, maximumFractionDigits:2});
+function fmtAmt(v, d){ if (typeof v !== "number") return "?"; if (v === 0) return "0"; return v.toLocaleString("ru-RU", {maximumFractionDigits:d}); }
+function renderTotal(){
+  $("balbar").hidden = !wallets.length;
+  let sum = 0, any = false;
+  for (const w of wallets){ const u = usdOf(bal.w[w.k]); if (u != null){ sum += u; any = true; } }
+  $("total").textContent = any ? fmtUsd(sum) : "—";
+  if (bal.t) $("balTime").textContent = "Обновлено " + new Date(bal.t).toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", hour:"2-digit", minute:"2-digit"});
+}
+function balChips(w){
+  const b = bal.w[w.k], box = el("div","bals");
+  if (!b){ box.appendChild(el("span","bal","Баланс: нажмите «Обновить балансы»")); return box; }
+  const items = [["USDT", b.usdt, 2], ["TRX", b.trx, 2], ["BTC", b.btc, 8], ["SOL", b.sol, 4]];
+  for (const [n, v, d] of items){ const c = el("span", "bal" + (v > 0 ? " pos" : ""), n + " " + fmtAmt(v, d)); box.appendChild(c); }
+  const u = usdOf(b); if (u != null) box.appendChild(el("span","bal usd","≈ " + fmtUsd(u)));
+  return box;
+}
+let balBusy = false;
+async function refreshBalances(){
+  if (balBusy || !wallets.length) return;
+  balBusy = true; $("balBtn").disabled = true;
+  let errs = 0;
+  try { bal.px = await prices(); } catch(e){ errs++; }
+  for (let i = 0; i < wallets.length; i++){
+    const w = wallets[i];
+    $("balBtn").textContent = "Загружаю " + (i+1) + " из " + wallets.length + "…";
+    const [t, b, s] = await Promise.allSettled([balTron(w.a.trx), balBtc(w.a.btc), balSol(w.a.sol)]);
+    const prev = bal.w[w.k] || {};
+    const cur = {
+      usdt: t.status === "fulfilled" ? t.value.usdt : prev.usdt,
+      trx:  t.status === "fulfilled" ? t.value.trx  : prev.trx,
+      btc:  b.status === "fulfilled" ? b.value : prev.btc,
+      sol:  s.status === "fulfilled" ? s.value : prev.sol
+    };
+    errs += [t, b, s].filter(x => x.status !== "fulfilled").length;
+    bal.w[w.k] = cur;
+    if (i < wallets.length - 1) await sleep(350);
+  }
+  bal.t = Date.now(); saveBal();
+  $("balBtn").textContent = "Обновить балансы"; $("balBtn").disabled = false; balBusy = false;
+  renderList();
+  msg($("m2"), errs ? "Часть данных не загрузилась (сервис не ответил) — показаны последние известные. Попробуйте обновить через минуту." : "", errs ? "err" : "ok");
+}
+$("balBtn").onclick = refreshBalances;
+
+function openSafePal(out){
+  let left = false;
+  const onHide = () => { left = true; };
+  document.addEventListener("visibilitychange", onHide, {once:true});
+  window.addEventListener("blur", onHide, {once:true});
+  try { window.location.href = "safepalwallet://"; } catch(e){}
+  setTimeout(() => {
+    if (!left && out) msg(out, "Фраза скопирована, но SafePal не открылся сам — откройте его вручную: «+» → Импорт кошелька → Фраза восстановления → Вставить.", "ok");
+  }, 1500);
+}
+$("q").addEventListener("input", renderList);
+document.querySelectorAll(".chip").forEach(c => c.onclick = () => {
+  filter = c.dataset.f;
+  document.querySelectorAll(".chip").forEach(x => x.setAttribute("aria-pressed", x === c));
+  renderList();
+});
 
 async function loadList(){
   try {
@@ -363,7 +543,7 @@ entropyToMnemonic(new Uint8Array(16)).then(w => {
     SeedDerive.addresses(w.join(" ")).trx === "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH";
   if (!ok){ $("gen").disabled = true; msg($("m1"), "Ошибка самопроверки, создание отключено.", "err"); }
 });
-loadList();
+loadList().then(() => { if (wallets.length && Date.now() - (bal.t || 0) > 10*60*1000) refreshBalances(); });
 </script>
 </body>
 </html>
