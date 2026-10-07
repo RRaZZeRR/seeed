@@ -79,6 +79,13 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
 .bal{font:500 12px var(--mono);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-variant-numeric:tabular-nums;color:var(--muted)}
 .bal.pos{color:var(--fg);border-color:var(--accent)}
 .bal.usd{color:var(--fg)}
+.qty{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.qty .stepper{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;align-items:stretch}
+.qty .stepper button{border:0;background:transparent;color:var(--fg);width:40px;font:500 18px var(--sans);cursor:pointer}
+.qty .stepper input{width:56px;text-align:center;border:0;border-radius:0;background:transparent;padding:8px 0;font:500 16px var(--sans);font-variant-numeric:tabular-nums}
+.qty .presets{display:flex;gap:6px}
+.qty span.lbl{font-size:13px;color:var(--muted)}
+progress{width:100%;height:6px;accent-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -97,6 +104,19 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
     <label>Название (пусто = номер по порядку)
       <input id="label" autocomplete="off" placeholder="например: Основной">
     </label>
+    <div class="qty">
+      <span class="lbl">Сколько создать</span>
+      <div class="stepper">
+        <button id="qm" aria-label="Меньше">−</button>
+        <input id="qn" type="number" inputmode="numeric" min="1" max="50" value="1" aria-label="Количество кошельков">
+        <button id="qp" aria-label="Больше">+</button>
+      </div>
+      <div class="presets">
+        <button class="chip" data-q="5">5</button>
+        <button class="chip" data-q="10">10</button>
+        <button class="chip" data-q="20">20</button>
+      </div>
+    </div>
     <div class="row">
       <div class="seg" role="group" aria-label="Количество слов">
         <button id="n12" aria-pressed="true">12 слов</button>
@@ -104,6 +124,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
       </div>
       <button class="btn primary" id="gen">Создать</button>
     </div>
+    <progress id="prog" max="1" value="0" hidden></progress>
     <div id="newBox" hidden>
       <div style="display:grid;gap:10px">
         <div class="whead"><strong id="newTitle"></strong><small id="newDate"></small></div>
@@ -456,9 +477,9 @@ function openSafePal(out){
   }, 1500);
 }
 $("q").addEventListener("input", renderList);
-document.querySelectorAll(".chip").forEach(c => c.onclick = () => {
+document.querySelectorAll(".chip[data-f]").forEach(c => c.onclick = () => {
   filter = c.dataset.f;
-  document.querySelectorAll(".chip").forEach(x => x.setAttribute("aria-pressed", x === c));
+  document.querySelectorAll(".chip[data-f]").forEach(x => x.setAttribute("aria-pressed", x === c));
   renderList();
 });
 
@@ -488,32 +509,57 @@ function setN(v){ n = v; $("n12").setAttribute("aria-pressed", v===12); $("n24")
 $("n12").onclick = () => setN(12);
 $("n24").onclick = () => setN(24);
 
+const QMAX = 50;
+function getQ(){ let q = parseInt($("qn").value, 10); if (!(q >= 1)) q = 1; if (q > QMAX) q = QMAX; return q; }
+function setQ(q){ $("qn").value = Math.min(QMAX, Math.max(1, q)); $("gen").textContent = getQ() > 1 ? "Создать " + getQ() : "Создать"; }
+$("qm").onclick = () => setQ(getQ() - 1);
+$("qp").onclick = () => setQ(getQ() + 1);
+$("qn").addEventListener("input", () => { $("gen").textContent = getQ() > 1 ? "Создать " + getQ() : "Создать"; });
+$("qn").addEventListener("change", () => setQ(getQ()));
+document.querySelectorAll(".chip[data-q]").forEach(c => c.onclick = () => setQ(parseInt(c.dataset.q, 10)));
+
+async function makeWallet(label, pw){
+  const words = await entropyToMnemonic(crypto.getRandomValues(new Uint8Array(n === 12 ? 16 : 32)));
+  const a = SeedDerive.addresses(words.join(" ")); delete a.btcLegacy;
+  let t = Date.now(); while (wallets.some(x => x.t === t)) t++;
+  const w = {k: "w_" + t, label, t, a, c: await encrypt(words.join(" "), pw)};
+  return {w, words};
+}
+
 $("gen").onclick = async () => {
   const pw = $("pw").value;
   if (pw.length < 8){ msg($("m1"), "Сначала задайте пароль шифрования (от 8 символов) — без него кошелёк не сохранить.", "err"); $("pw").focus(); return; }
-  $("gen").disabled = true; msg($("m1"), "Создаю и шифрую…");
+  const q = getQ(), base = $("label").value.trim(), start = wallets.length;
+  $("gen").disabled = true; $("qm").disabled = $("qp").disabled = true;
+  let saved = 0, sent = 0, sendErr = "", botOn = null;
+  if (q > 1){ $("newBox").hidden = true; $("prog").hidden = false; $("prog").max = q; $("prog").value = 0; }
   try {
-    current = await entropyToMnemonic(crypto.getRandomValues(new Uint8Array(n === 12 ? 16 : 32)));
-    const a = SeedDerive.addresses(current.join(" ")); delete a.btcLegacy;
-    const t = Date.now();
-    const label = $("label").value.trim() || ("Кошелёк " + (wallets.length + 1));
-    const w = {label, t, a, c: await encrypt(current.join(" "), pw)};
-    $("newTitle").textContent = label; $("newDate").textContent = fmtDate(t);
-    renderWords($("words"), current); $("words").classList.remove("blur"); $("hide").textContent = "Скрыть";
-    renderAddrs($("addrs"), a, $("m1"));
-    $("newBox").hidden = false;
-    const k = "w_" + t;
-    let saved = true;
-    try { await store.set(k, JSON.stringify({label, t, a, c: w.c})); wallets.unshift(Object.assign({k}, w)); renderList(); }
-    catch(e){ saved = false; }
-    const sent = await sendByBot(w);
-    const parts = [saved ? "Сохранено в «Мои кошельки»" : "Не удалось сохранить в список"];
-    if (sent === true) parts.push("бот прислал сообщение");
-    else if (typeof sent === "string") parts.push("бот не отправил: " + sent);
-    msg($("m1"), parts.join(" · ") + ".", (saved && typeof sent !== "string") ? "ok" : "err");
+    for (let i = 0; i < q; i++){
+      msg($("m1"), q > 1 ? "Создаю " + (i+1) + " из " + q + "…" : "Создаю и шифрую…");
+      const label = base ? (q > 1 ? base + " " + (i+1) : base) : ("Кошелёк " + (start + i + 1));
+      const {w, words} = await makeWallet(label, pw);
+      if (q === 1){
+        current = words;
+        $("newTitle").textContent = label; $("newDate").textContent = fmtDate(w.t);
+        renderWords($("words"), words); $("words").classList.remove("blur"); $("hide").textContent = "Скрыть";
+        renderAddrs($("addrs"), w.a, $("m1"));
+        $("newBox").hidden = false;
+      }
+      try { await saveWallet(w); wallets.unshift(w); saved++; renderList(); } catch(e){}
+      const r = await sendByBot(w);
+      if (r === true){ sent++; botOn = true; } else if (typeof r === "string"){ sendErr = r; } else botOn = false;
+      $("prog").value = i + 1;
+      if (q > 1 && i < q - 1 && botOn) await sleep(1100);   // Telegram: не чаще 1 сообщения в секунду в один чат
+    }
+    const parts = [];
+    parts.push(q > 1 ? ("Создано и сохранено: " + saved + " из " + q) : (saved ? "Сохранено в «Мои кошельки»" : "Не удалось сохранить в список"));
+    if (sent) parts.push(q > 1 ? "бот прислал " + sent + " " + (sent % 10 === 1 && sent % 100 !== 11 ? "сообщение" : (sent % 10 >= 2 && sent % 10 <= 4 && (sent % 100 < 12 || sent % 100 > 14)) ? "сообщения" : "сообщений") : "бот прислал сообщение");
+    if (sendErr) parts.push("бот не отправил: " + sendErr);
+    msg($("m1"), parts.join(" · ") + ".", (saved === q && !sendErr) ? "ok" : "err");
     $("label").value = "";
   } catch(e){ msg($("m1"), "Ошибка: " + e.message, "err"); }
-  $("gen").disabled = false;
+  $("prog").hidden = true;
+  $("gen").disabled = false; $("qm").disabled = $("qp").disabled = false;
 };
 $("hide").onclick = () => { const b = $("words").classList.toggle("blur"); $("hide").textContent = b ? "Показать" : "Скрыть"; };
 $("copy").onclick = () => current && copyText(current.join(" "), $("m1"), "Фраза скопирована. Вставьте в SafePal → Импорт кошелька.");
