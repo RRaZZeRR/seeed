@@ -146,7 +146,10 @@ progress{width:100%;height:6px;accent-color:var(--accent)}
       <div class="sum"><small>Всего на кошельках</small><b id="total">—</b><small id="balTime">Балансы ещё не загружались</small></div>
       <button class="btn small" id="balBtn">Обновить балансы</button>
     </div>
-    <label class="check" id="notifyRow" hidden><input id="notify" type="checkbox" checked> Уведомлять в Telegram о поступлении монет</label>
+    <div id="notifyRow" hidden style="display:grid;gap:6px">
+      <label class="check"><input id="notifyBtc" type="checkbox" checked> Уведомлять о поступлении BTC</label>
+      <label class="check"><input id="notifyOther" type="checkbox" checked> Уведомлять об остальных монетах (USDT, TRX, SOL и др.)</label>
+    </div>
     <div class="tools" id="tools" hidden>
       <input id="q" type="search" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Поиск по названию или адресу">
       <div class="chips" role="group" aria-label="Фильтр">
@@ -509,25 +512,32 @@ async function sendByBot(w){
   } catch(e){ return "нет связи с сервером"; }
 }
 
-let notifyOn = true;
+let notifyBtc = true, notifyOther = true;
 async function syncWatch(){
   if (!WORKER_URL || WORKER_URL.startsWith("__") || !TG) return;
   try {
     await fetch(WORKER_URL.replace(/\/$/,"") + "/watch", {method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({initData: TG.initData, notify: notifyOn,
+      body: JSON.stringify({initData: TG.initData, notifyBtc, notifyOther,
         wallets: wallets.map(w => ({label: w.label, t: w.t, btc: w.a.btc, trx: w.a.trx, sol: w.a.sol, evm: w.a.evm}))})});
   } catch(e){}
 }
 async function loadNotify(){
-  try { const v = await store.get(["s_notify"]); notifyOn = v.s_notify !== "0"; } catch(e){}
-  $("notify").checked = notifyOn;
+  try {
+    const v = await store.get(["s_notify", "s_nbtc", "s_noth"]);
+    const old = v.s_notify !== "0";
+    notifyBtc = v.s_nbtc != null && v.s_nbtc !== "" ? v.s_nbtc !== "0" : old;
+    notifyOther = v.s_noth != null && v.s_noth !== "" ? v.s_noth !== "0" : old;
+  } catch(e){}
+  $("notifyBtc").checked = notifyBtc; $("notifyOther").checked = notifyOther;
 }
-$("notify").onchange = async () => {
-  notifyOn = $("notify").checked;
-  try { await store.set("s_notify", notifyOn ? "1" : "0"); } catch(e){}
+async function onNotifyChange(){
+  notifyBtc = $("notifyBtc").checked; notifyOther = $("notifyOther").checked;
+  try { await store.set("s_nbtc", notifyBtc ? "1" : "0"); await store.set("s_noth", notifyOther ? "1" : "0"); } catch(e){}
   await syncWatch();
-  msg($("m2"), notifyOn ? "Уведомления о поступлениях включены." : "Уведомления о поступлениях выключены.", "ok");
-};
+  msg($("m2"), "Уведомления: BTC — " + (notifyBtc ? "вкл" : "выкл") + ", остальные монеты — " + (notifyOther ? "вкл" : "выкл") + ".", "ok");
+}
+$("notifyBtc").onchange = onNotifyChange;
+$("notifyOther").onchange = onNotifyChange;
 // старые кошельки без EVM-адреса: досчитываем, когда есть пароль
 let migrating = false;
 async function migrateEvm(){

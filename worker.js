@@ -2,7 +2,9 @@
 //  POST /        — мини-приложение присылает новый кошелёк, бот пишет его вам в ЛС.
 //  POST /watch   — мини-приложение присылает адреса кошельков и настройку уведомлений.
 //  Каждую минуту (Cron Trigger) сервер проверяет адреса и пишет о поступлениях:
-//    BTC — сразу, как транзакция появилась в сети (0 подтверждений);
+//    BTC — при 0 подтверждений и при 1-м подтверждении.
+//    Последний созданный кошелёк каждого пользователя проверяется часто (BTC ~каждые 6 секунд),
+//    старые — по очереди, по несколько штук в минуту, чтобы не тратить лишние запросы.
 //    USDT TRC20 и TRX, SOL, а также ETH/BNB/POL и USDT/USDC в сетях
 //    Ethereum, BNB Chain, Polygon, Arbitrum, Base — как только баланс вырос.
 // Нужно: секрет BOT_TOKEN и KV-хранилище, подключённое под именем KV.
@@ -14,7 +16,10 @@ const RE = {
   sol: new RegExp(`^${B58}{32,44}$`),
   evm: /^0x[0-9a-fA-F]{40}$/,
 };
-const PER_RUN = 15; // кошельков за один запуск: бесплатный тариф даёт 50 внешних запросов
+// Бесплатный тариф Cloudflare: 50 внешних запросов за один запуск (запуск раз в минуту).
+const SUB_LIMIT = 46;      // запас под отправку сообщений
+const MAX_ROUNDS = 10;     // последний кошелёк: до 10 проверок BTC в минуту — примерно каждые 6 секунд
+const OLD_PER_RUN = 3;     // старые кошельки: сколько проверять за минуту (по очереди); 0 — не проверять совсем
 
 const USDT_TRC20 = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
 const CHAINS = [
@@ -58,7 +63,7 @@ export default {
       const list = Array.isArray(b.wallets) ? b.wallets.slice(0, 200) : [];
       const w = [], fresh = [];
       for (const x of list) {
-        const item = { label: String(x.label || "Кошелёк").slice(0, 60) };
+        const item = { label: String(x.label || "Кошелёк").slice(0, 60), t: Number(x.t) || 0 };
         for (const k of ["btc", "trx", "sol", "evm"]) if (RE[k].test(String(x[k] || ""))) item[k] = String(x[k]);
         if (!item.btc && !item.trx && !item.sol && !item.evm) continue;
         w.push(item);
@@ -66,7 +71,9 @@ export default {
         if (Date.now() - Number(x.t || 0) < 10 * 60000) for (const k of ["btc", "trx", "sol", "evm"]) if (item[k]) fresh.push(item[k].toLowerCase());
       }
       const data = (await env.KV.get("watch", "json")) || { users: {} };
-      data.users[String(user.id)] = { w, n: b.notify !== false };
+      const nb = b.notifyBtc !== undefined ? b.notifyBtc !== false : b.notify !== false;
+      const no = b.notifyOther !== undefined ? b.notifyOther !== false : b.notify !== false;
+      data.users[String(user.id)] = { w, nb, no };
       await env.KV.put("watch", JSON.stringify(data));
       if (fresh.length) {
         const seen = (await env.KV.get("seen", "json")) || { tx: {}, addr: {} };
@@ -74,7 +81,7 @@ export default {
         for (const a of fresh) if (!seen.addr[a]) { seen.addr[a] = 1; ch = true; }
         if (ch) await env.KV.put("seen", JSON.stringify(seen));
       }
-      return json({ ok: true, watching: w.length, notify: b.notify !== false });
+      return json({ ok: true, watching: w.length, notifyBtc: nb, notifyOther: no });
     }
 
     // ---- новый кошелёк: сообщение в ЛС ----
@@ -106,18 +113,79 @@ async function checkAll(env) {
   if (!data || !data.users) return;
 
   const all = [];
-  for (const [uid, u] of Object.entries(data.users)) for (const w of u.w || []) all.push({ uid, n: u.n !== false, ...w });
+  for (const [uid, u] of Object.entries(data.users)) for (const w of u.w || []) all.push({ uid, ...w,
+    nb: u.nb !== undefined ? u.nb : u.n !== false,     // уведомления о BTC
+    no: u.no !== undefined ? u.no : u.n !== false });   // уведомления об остальных монетах
   if (!all.length) return;
-  const chunks = Math.ceil(all.length / PER_RUN);
-  const part = Math.floor(Date.now() / 60000) % chunks;
-  const batch = all.slice(part * PER_RUN, part * PER_RUN + PER_RUN);
+  const minute = Math.floor(Date.now() / 60000);
+  const pick = (list, per) => { if (!list.length) return []; const ch = Math.ceil(list.length / per), p = minute % ch; return list.slice(p * per, p * per + per); };
+
+  // последний созданный кошелёк каждого пользователя — главный, его проверяем часто
+  const newest = {};
+  for (const w of all) if (!newest[w.uid] || (w.t || 0) > (newest[w.uid].t || 0)) newest[w.uid] = w;
+  const hot = Object.values(newest);
+  const cold = OLD_PER_RUN > 0 ? pick(all.filter((w) => !hot.includes(w)), OLD_PER_RUN) : [];
+
+  const btcFast = hot.filter((w) => w.btc && w.nb).slice(0, 10);                          // BTC несколько раз в минуту
+  const btcSlow = [...hot.filter((w) => w.btc && !w.nb), ...cold.filter((w) => w.btc)];   // раз в минуту
+  const others = [...hot, ...cold].filter((w) => w.trx || w.sol || w.evm);
+  // сколько запросов уйдёт на первый раунд — остаток делим на быстрые проверки BTC
+  const cost0 = btcFast.length + btcSlow.length + others.filter((w) => w.trx).length
+    + (others.some((w) => w.sol) ? 1 : 0) + (others.some((w) => w.evm) ? CHAINS.length : 0) + 3;
+  const rounds = btcFast.length ? 1 + Math.max(0, Math.min(MAX_ROUNDS - 1, Math.floor((SUB_LIMIT - cost0) / (btcFast.length + 1)))) : 1;
 
   const seen = (await env.KV.get("seen", "json")) || { tx: {}, addr: {} };
   const bal = (await env.KV.get("bal", "json")) || {};
-  let seenCh = false, balCh = false;
-  const found = []; // {uid, label, amount(BigInt), dec, sym, net, cg, extra}
+  let seenCh = false, balCh = false, sub = 0;
+  let found = [];
+  const get = async (url, opt) => { sub++; const r = await fetch(url, opt); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); };
 
-  // сравнение баланса с прошлым: сообщаем только о росте
+  // ---- BTC ----
+  function btcTx(w, tx, first) {
+    const key = w.btc + ":" + tx.txid;
+    const rec = seen.tx[key];
+    const conf = !!(tx.status && tx.status.confirmed);
+    if (typeof rec === "number" || (rec && rec.c === 1)) return;
+    if (rec && rec.c === 0 && !conf) return;
+    let inSat = 0, outSat = 0;
+    for (const o of tx.vout || []) if (o.scriptpubkey_address === w.btc) inSat += o.value;
+    for (const i of tx.vin || []) if (i.prevout && i.prevout.scriptpubkey_address === w.btc) outSat += i.prevout.value;
+    const net = inSat - outSat;
+    seenCh = true;
+    if (first || net <= 0) { seen.tx[key] = { t: Date.now(), c: 1 }; return; }
+    if (!conf) { seen.tx[key] = { t: Date.now(), c: 0, n: net }; btcFound(w, net, 0, tx.txid); }
+    else { seen.tx[key] = { t: rec ? rec.t : Date.now(), c: 1 }; btcFound(w, net, 1, tx.txid); }
+  }
+  function btcFound(w, net, stage, txid) {
+    if (!w.nb) return;
+    const link = ` · <a href="https://mempool.space/tx/${txid}">tx</a>`;
+    found.push({ uid: w.uid, label: w.label, amount: BigInt(net), dec: 8, sym: "BTC", net: "Bitcoin", cg: "bitcoin", stage,
+      extra: stage === 0 ? "⏳ в мемпуле, 0 подтверждений" + link : "✅ 1 подтверждение" + link });
+  }
+  // полная проверка адреса: все последние транзакции
+  async function btcFull(w) {
+    let txs; try { txs = await get(`https://mempool.space/api/address/${w.btc}/txs`); } catch { return; }
+    const a = w.btc.toLowerCase(), first = !seen.addr[a];
+    if (first) { seen.addr[a] = 1; seenCh = true; }
+    for (const tx of txs) btcTx(w, tx, first);
+  }
+  // быстрая проверка: новые транзакции в мемпуле + подтверждение уже замеченных
+  async function btcQuick(w) {
+    const pend = Object.keys(seen.tx).filter((k) => k.startsWith(w.btc + ":") && seen.tx[k] && seen.tx[k].c === 0);
+    const tasks = [(async () => {
+      let txs; try { txs = await get(`https://mempool.space/api/address/${w.btc}/txs/mempool`); } catch { return; }
+      for (const tx of txs) btcTx(w, tx, false);
+    })()];
+    for (const k of pend) tasks.push((async () => {
+      const txid = k.split(":")[1];
+      let st; try { st = await get(`https://mempool.space/api/tx/${txid}/status`); } catch { return; }
+      const rec = seen.tx[k];
+      if (st.confirmed && rec && rec.c === 0) { seen.tx[k] = { t: rec.t, c: 1 }; seenCh = true; btcFound(w, rec.n || 0, 1, txid); }
+    })());
+    await Promise.all(tasks);
+  }
+
+  // ---- остальные монеты: сравнение баланса, сообщаем только о росте ----
   function diff(w, addr, asset, val, dec, sym, net, cg, minUnits) {
     const key = addr.toLowerCase() + "|" + asset;
     const prevS = bal[key];
@@ -125,113 +193,93 @@ async function checkAll(env) {
     if (prevS === undefined) {
       bal[key] = cur.toString(); balCh = true;
       if (!seen.addr[addr.toLowerCase()]) return;    // первый раз видим адрес — просто запоминаем
-      if (cur >= minUnits && w.n) found.push({ uid: w.uid, label: w.label, amount: cur, dec, sym, net, cg });
+      if (cur >= minUnits && w.no) found.push({ uid: w.uid, label: w.label, amount: cur, dec, sym, net, cg });
       return;
     }
     const prev = BigInt(prevS);
     if (cur !== prev) { bal[key] = cur.toString(); balCh = true; }
-    if (cur - prev >= minUnits && w.n) found.push({ uid: w.uid, label: w.label, amount: cur - prev, dec, sym, net, cg });
+    if (cur - prev >= minUnits && w.no) found.push({ uid: w.uid, label: w.label, amount: cur - prev, dec, sym, net, cg });
+  }
+  async function othersCheck() {
+    const jobs = [];
+    for (const w of others) if (w.trx) jobs.push((async () => {
+      let j; try { j = await get(`https://api.trongrid.io/v1/accounts/${w.trx}`); } catch { return; }
+      if (!j || j.success === false) return;
+      let trx = 0n, usdt = 0n;
+      const d = j.data && j.data[0];
+      if (d) { trx = BigInt(d.balance || 0); for (const o of d.trc20 || []) if (o[USDT_TRC20] != null) usdt = BigInt(o[USDT_TRC20]); }
+      diff(w, w.trx, "usdt", usdt, 6, "USDT", "TRC20", "tether", 10000n);
+      diff(w, w.trx, "trx", trx, 6, "TRX", "TRON", "tron", 100000n);
+    })());
+    const solW = others.filter((w) => w.sol);
+    if (solW.length) jobs.push((async () => {
+      let j; try { j = await get("https://solana-rpc.publicnode.com", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [solW.map((w) => w.sol), { encoding: "base64", commitment: "processed" }] }) }); } catch { return; }
+      if (!j.result || !Array.isArray(j.result.value)) return;
+      solW.forEach((w, i) => { const acc = j.result.value[i]; diff(w, w.sol, "sol", acc ? acc.lamports : 0, 9, "SOL", "Solana", "solana", 100000n); });
+    })());
+    const evmW = others.filter((w) => w.evm);
+    if (evmW.length) for (const c of CHAINS) jobs.push((async () => {
+      const calls = [], meta = [];
+      for (const w of evmW) {
+        calls.push({ jsonrpc: "2.0", id: calls.length, method: "eth_getBalance", params: [w.evm, "latest"] });
+        meta.push({ w, asset: c.id + ":" + c.native.sym, dec: c.native.dec, sym: c.native.sym, cg: c.native.cg, min: 10n ** BigInt(c.native.dec - 6) });
+        for (const t of c.tokens) {
+          calls.push({ jsonrpc: "2.0", id: calls.length, method: "eth_call",
+            params: [{ to: t.a, data: "0x70a08231" + w.evm.slice(2).toLowerCase().padStart(64, "0") }, "latest"] });
+          meta.push({ w, asset: c.id + ":" + t.sym, dec: t.dec, sym: t.sym, cg: "tether", min: 10n ** BigInt(t.dec - 2) });
+        }
+      }
+      let res; try { res = await get(c.rpc, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(calls) }); } catch { return; }
+      if (!Array.isArray(res)) return;
+      for (const x of res) {
+        const m = meta[x.id];
+        if (!m || typeof x.result !== "string" || !/^0x[0-9a-fA-F]*$/.test(x.result)) continue;
+        diff(m.w, m.w.evm, m.asset, x.result === "0x" ? 0n : BigInt(x.result), m.dec, m.sym, c.name, m.cg, m.min);
+      }
+    })());
+    await Promise.all(jobs);
   }
 
-  const jobs = [];
-
-  // BTC — по транзакциям, сразу из мемпула
-  for (const w of batch) if (w.btc) jobs.push((async () => {
-    let txs;
-    try { const r = await fetch(`https://mempool.space/api/address/${w.btc}/txs`); if (!r.ok) return; txs = await r.json(); } catch { return; }
-    const first = !seen.addr[w.btc.toLowerCase()];
-    if (first) { seen.addr[w.btc.toLowerCase()] = 1; seenCh = true; }
-    for (const tx of txs) {
-      const key = w.btc + ":" + tx.txid;
-      if (seen.tx[key]) continue;
-      seen.tx[key] = Date.now(); seenCh = true;
-      if (first || !w.n) continue;
-      let inSat = 0, outSat = 0;
-      for (const o of tx.vout || []) if (o.scriptpubkey_address === w.btc) inSat += o.value;
-      for (const i of tx.vin || []) if (i.prevout && i.prevout.scriptpubkey_address === w.btc) outSat += i.prevout.value;
-      if (inSat - outSat > 0) found.push({ uid: w.uid, label: w.label, amount: BigInt(inSat - outSat), dec: 8, sym: "BTC", net: "Bitcoin", cg: "bitcoin",
-        extra: (tx.status && tx.status.confirmed ? "подтверждена" : "в мемпуле, 0 подтверждений") + ` · <a href="https://mempool.space/tx/${tx.txid}">tx</a>` });
-    }
-  })());
-
-  // TRON — TRX и USDT TRC20 одним запросом на адрес
-  for (const w of batch) if (w.trx) jobs.push((async () => {
-    let j;
-    try { const r = await fetch(`https://api.trongrid.io/v1/accounts/${w.trx}`); if (!r.ok) return; j = await r.json(); } catch { return; }
-    if (!j || j.success === false) return;
-    let trx = 0n, usdt = 0n;
-    const d = j.data && j.data[0];
-    if (d) {
-      trx = BigInt(d.balance || 0);
-      for (const o of d.trc20 || []) if (o[USDT_TRC20] != null) usdt = BigInt(o[USDT_TRC20]);
-    }
-    diff(w, w.trx, "usdt", usdt, 6, "USDT", "TRC20", "tether", 10000n);
-    diff(w, w.trx, "trx", trx, 6, "TRX", "TRON", "tron", 100000n);
-  })());
-
-  // SOL — все адреса пачки одним запросом
-  const solW = batch.filter((w) => w.sol);
-  if (solW.length) jobs.push((async () => {
-    let j;
-    try {
-      const r = await fetch("https://solana-rpc.publicnode.com", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [solW.map((w) => w.sol), { encoding: "base64", commitment: "processed" }] }) });
-      if (!r.ok) return; j = await r.json();
-    } catch { return; }
-    if (!j.result || !Array.isArray(j.result.value)) return;
-    solW.forEach((w, i) => { const acc = j.result.value[i]; diff(w, w.sol, "sol", acc ? acc.lamports : 0, 9, "SOL", "Solana", "solana", 100000n); });
-  })());
-
-  // EVM — по одному пакетному запросу на сеть: баланс монеты + USDT/USDC
-  const evmW = batch.filter((w) => w.evm);
-  if (evmW.length) for (const c of CHAINS) jobs.push((async () => {
-    const calls = [], meta = [];
-    for (const w of evmW) {
-      calls.push({ jsonrpc: "2.0", id: calls.length, method: "eth_getBalance", params: [w.evm, "latest"] });
-      meta.push({ w, asset: c.id + ":" + c.native.sym, dec: c.native.dec, sym: c.native.sym, cg: c.native.cg, min: 10n ** BigInt(c.native.dec - 6) });
-      for (const t of c.tokens) {
-        calls.push({ jsonrpc: "2.0", id: calls.length, method: "eth_call",
-          params: [{ to: t.a, data: "0x70a08231" + w.evm.slice(2).toLowerCase().padStart(64, "0") }, "latest"] });
-        meta.push({ w, asset: c.id + ":" + t.sym, dec: t.dec, sym: t.sym, cg: "tether", min: 10n ** BigInt(t.dec - 2) });
+  // ---- отправка и сохранение ----
+  let px = null;
+  async function flush() {
+    if (found.length) {
+      const list0 = found; found = [];
+      if (!px) { try { px = await get(`https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,tether,tron,solana,ethereum,binancecoin,polygon-ecosystem-token&vs_currencies=usd`); } catch { px = {}; } }
+      const byUser = {};
+      for (const f of list0) (byUser[f.uid] = byUser[f.uid] || []).push(f);
+      for (const [uid, list] of Object.entries(byUser)) {
+        const lines = list.map((f) => {
+          const amt = fmtUnits(f.amount, f.dec);
+          const usd = px[f.cg] && px[f.cg].usd ? Number(amt) * px[f.cg].usd : null;
+          return `«${esc(f.label)}»: <b>+${amt} ${f.sym}</b> (${f.net})` + (usd != null ? ` ≈ $${usd.toFixed(2)}` : "") + (f.extra ? `\n   ${f.extra}` : "");
+        });
+        const head = list.every((f) => f.stage === 1) ? "✅ <b>Подтверждено</b>" : "💰 <b>Поступление</b>";
+        sub++; await send(env, Number(uid), head + `\n\n` + lines.join("\n"), true);
       }
     }
-    let res;
-    try {
-      const r = await fetch(c.rpc, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(calls) });
-      if (!r.ok) return; res = await r.json();
-    } catch { return; }
-    if (!Array.isArray(res)) return;
-    for (const x of res) {
-      const m = meta[x.id];
-      if (!m || typeof x.result !== "string" || !/^0x[0-9a-fA-F]*$/.test(x.result)) continue;
-      diff(m.w, m.w.evm, m.asset, x.result === "0x" ? 0n : BigInt(x.result), m.dec, m.sym, c.name, m.cg, m.min);
+    if (seenCh) {
+      const lim = Date.now() - 30 * 864e5;
+      for (const k in seen.tx) { const v = seen.tx[k]; if ((typeof v === "number" ? v : v.t) < lim) delete seen.tx[k]; }
+      await env.KV.put("seen", JSON.stringify(seen)); seenCh = false;
     }
-  })());
-
-  await Promise.all(jobs);
-
-  if (found.length) {
-    const ids = [...new Set(found.map((f) => f.cg))].join(",");
-    let px = {};
-    try { px = await (await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd`)).json(); } catch {}
-    const byUser = {};
-    for (const f of found) (byUser[f.uid] = byUser[f.uid] || []).push(f);
-    for (const [uid, list] of Object.entries(byUser)) {
-      const lines = list.map((f) => {
-        const amt = fmtUnits(f.amount, f.dec);
-        const usd = px[f.cg] && px[f.cg].usd ? Number(amt) * px[f.cg].usd : null;
-        return `«${esc(f.label)}»: <b>+${amt} ${f.sym}</b> (${f.net})` + (usd != null ? ` ≈ $${usd.toFixed(2)}` : "") + (f.extra ? `\n   ${f.extra}` : "");
-      });
-      await send(env, Number(uid), `💰 <b>Поступление</b>\n\n` + lines.join("\n"), true);
-    }
+    if (balCh) { await env.KV.put("bal", JSON.stringify(bal)); balCh = false; }
   }
 
-  if (seenCh) {
-    const lim = Date.now() - 30 * 864e5;
-    for (const k in seen.tx) if (seen.tx[k] < lim) delete seen.tx[k];
-    await env.KV.put("seen", JSON.stringify(seen));
+  // раунд 0: полная проверка BTC и остальные монеты
+  const start = Date.now();
+  await Promise.all([...btcFast.map(btcFull), ...btcSlow.map(btcFull), othersCheck()]);
+  await flush();
+  // следующие раунды: только BTC, каждые ~10 секунд, пока хватает лимита запросов
+  const step = Math.floor(58000 / rounds);
+  for (let r = 1; r < rounds; r++) {
+    const wait = start + r * step - Date.now();
+    if (wait > 0) await new Promise((res) => setTimeout(res, wait));
+    if (sub + btcFast.length + 1 > SUB_LIMIT) break;
+    await Promise.all(btcFast.map(btcQuick));
+    await flush();
   }
-  if (balCh) await env.KV.put("bal", JSON.stringify(bal));
 }
 
 // ---------- общее ----------
