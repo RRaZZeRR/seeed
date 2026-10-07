@@ -241,7 +241,7 @@ $("enc").onclick = async () => {
   all.set(salt); all.set(iv, 16); all.set(ct, 28);
   const c = "SP1:" + b64(all);
   $("cipher").textContent = c;
-  let num = 1; try{ num = (parseInt(localStorage.getItem("seed_n")) || 0) + 1; }catch(e){}
+  let num = 1; try{ num = (parseInt(localStorage.getItem(LN)) || 0) + 1; }catch(e){}
   const label = $("label").value.trim() || ("Кошелёк " + num);
   const head = "🔐 " + label + " · " + new Date().toLocaleDateString("ru-RU") + "\n\n" +
     "USDT TRC20: " + addr.trx + "\n" +
@@ -274,12 +274,13 @@ $("dec").onclick = async () => {
 // --- Telegram + запоминание пароля ---
 const TG = window.Telegram && Telegram.WebApp && Telegram.WebApp.initData !== undefined ? Telegram.WebApp : null;
 if (TG){ try{ TG.ready(); TG.expand(); }catch(e){} }
-const LS="seed_pw";
+const UID = (TG && TG.initDataUnsafe && TG.initDataUnsafe.user && TG.initDataUnsafe.user.id) ? "_" + TG.initDataUnsafe.user.id : "";
+const LS="seed_pw"+UID, LN="seed_n"+UID;
 try{ const s=localStorage.getItem(LS); if(s){ $("pw").value=s; $("dPw").value=s; $("rem").checked=true; } }catch(e){}
 function savePw(){ try{ if($("rem").checked) localStorage.setItem(LS,$("pw").value); else localStorage.removeItem(LS); }catch(e){} }
 $("rem").onchange=savePw; $("pw").addEventListener("change",savePw);
 $("tg").addEventListener("click",e=>{
-  try{ const n=parseInt($("tg").dataset.num); if(n && n > (parseInt(localStorage.getItem("seed_n"))||0)) localStorage.setItem("seed_n", n); }catch(_){}
+  try{ const n=parseInt($("tg").dataset.num); if(n && n > (parseInt(localStorage.getItem(LN))||0)) localStorage.setItem(LN, n); }catch(_){}
   $("label").value = "";
   if(TG && TG.openTelegramLink){ e.preventDefault(); TG.openTelegramLink($("tg").href); }
 });
