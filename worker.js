@@ -8,6 +8,8 @@
 //    USDT TRC20 и TRX, SOL, а также ETH/BNB/POL и USDT/USDC в сетях
 //    Ethereum, BNB Chain, Polygon, Arbitrum, Base — как только баланс вырос.
 // Нужно: секрет BOT_TOKEN и KV-хранилище, подключённое под именем KV.
+// Необязательно (для надёжности): секрет TRONGRID_KEY — бесплатный ключ с trongrid.io,
+//   секрет SOL_RPC — адрес своего узла Solana, например бесплатный от helius.dev.
 
 const B58 = "[1-9A-HJ-NP-Za-km-z]";
 const RE = {
@@ -231,26 +233,18 @@ async function checkAll(env, opt = {}) {
   async function othersCheck() {
     const jobs = [];
     for (const w of others) if (w.trx) jobs.push((async () => {
-      let trx = 0n, usdt = 0n;
+      let trx = 0n, usdt = 0n, tronGrid;
       try {
         [trx, usdt] = await firstOk([
-          async () => {
-            const j = await get(`https://api.trongrid.io/v1/accounts/${w.trx}`);
+          tronGrid = async () => {
+            const j = await get(`https://api.trongrid.io/v1/accounts/${w.trx}`, env.TRONGRID_KEY ? { headers: { "TRON-PRO-API-KEY": env.TRONGRID_KEY } } : undefined);
             if (!j || j.success === false) throw new Error("trongrid");
             const d = j.data && j.data[0]; let a = 0n, b = 0n;
             if (d) { a = BigInt(d.balance || 0); for (const o of d.trc20 || []) if (o[USDT_TRC20] != null) b = BigInt(o[USDT_TRC20]); }
             return [a, b];
           },
-          async () => {
-            const j = await get(`https://apilist.tronscanapi.com/api/account/tokens?address=${w.trx}&start=0&limit=50`);
-            if (!j || !Array.isArray(j.data)) throw new Error("tronscan");
-            let a = 0n, b = 0n;
-            for (const x of j.data) {
-              if (x.tokenId === "_") a = BigInt(String(x.balance || "0").split(".")[0]);
-              if (x.tokenId === USDT_TRC20) b = BigInt(String(x.balance || "0").split(".")[0]);
-            }
-            return [a, b];
-          },
+          // TronGrid без ключа часто отвечает 429 — подождём и спросим ещё раз
+          async () => { await new Promise((r) => setTimeout(r, 1500)); return tronGrid(); },
         ]);
       } catch { return; }
       diff(w, w.trx, "usdt", usdt, 6, "USDT", "TRC20", "tether", 10000n);
@@ -260,7 +254,7 @@ async function checkAll(env, opt = {}) {
     if (solW.length) jobs.push((async () => {
       const so = { method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [solW.map((w) => w.sol), { encoding: "base64", commitment: "processed" }] }) };
-      let j; try { j = await firstOk(["https://solana-rpc.publicnode.com", "https://api.mainnet-beta.solana.com"].map((u) => async () => {
+      let j; try { j = await firstOk([...(env.SOL_RPC ? [env.SOL_RPC] : []), "https://solana-rpc.publicnode.com", "https://solana.drpc.org", "https://api.mainnet-beta.solana.com"].map((u) => async () => {
         const x = await get(u, so); if (!x.result) throw new Error("rpc"); return x; })); } catch { return; }
       if (!j.result || !Array.isArray(j.result.value)) return;
       solW.forEach((w, i) => { const acc = j.result.value[i]; diff(w, w.sol, "sol", acc ? acc.lamports : 0, 9, "SOL", "Solana", "solana", 100000n); });
