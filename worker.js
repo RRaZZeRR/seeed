@@ -11,7 +11,8 @@
 
 const B58 = "[1-9A-HJ-NP-Za-km-z]";
 const RE = {
-  btc: /^bc1q[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38}$/,
+  // любой формат BTC: bc1q… (Native SegWit), bc1p… (Taproot), 3… (Nested SegWit), 1… (Legacy)
+  btc: /^(bc1q[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{38}|bc1p[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}|[13][1-9A-HJ-NP-Za-km-z]{25,34})$/,
   trx: new RegExp(`^T${B58}{33}$`),
   sol: new RegExp(`^${B58}{32,44}$`),
   evm: /^0x[0-9a-fA-F]{40}$/,
@@ -47,7 +48,16 @@ export default {
       new Response(JSON.stringify(obj), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
     if (req.method === "OPTIONS") return new Response(null, { headers: cors });
-    if (req.method !== "POST") return json({ ok: true, info: "Seed bot server работает", kv: !!env.KV });
+    if (req.method !== "POST") {
+      const url = new URL(req.url);
+      // диагностика: что сервер видит и какие сервисы ему отвечают (без адресов и ключей)
+      if (url.pathname === "/diag") {
+        if (!env.KV) return json({ ok: false, kv: false });
+        if (url.searchParams.get("run") === "1") return json(await checkAll(env, { single: true }));
+        return json({ ok: true, last: await env.KV.get("diag", "json") });
+      }
+      return json({ ok: true, info: "Seed bot server работает", kv: !!env.KV });
+    }
     if (!env.BOT_TOKEN) return json({ ok: false, error: "на сервере не задан BOT_TOKEN" }, 500);
 
     let b;
@@ -102,21 +112,24 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(checkAll(withKV(env)));
+    await checkAll(withKV(env));
   },
 };
 
 // ---------- проверка поступлений ----------
-async function checkAll(env) {
-  if (!env.KV || !env.BOT_TOKEN) return;
+async function checkAll(env, opt = {}) {
+  const diag = { t: new Date().toISOString(), users: 0, wallets: 0, rounds: 0, sub: 0, api: {}, found: 0, sent: [] };
+  if (!env.KV || !env.BOT_TOKEN) return { ...diag, error: "нет KV или BOT_TOKEN" };
   const data = await env.KV.get("watch", "json");
-  if (!data || !data.users) return;
+  if (!data || !data.users) return { ...diag, error: "сервер ещё не получил адреса (откройте мини-приложение)" };
 
   const all = [];
   for (const [uid, u] of Object.entries(data.users)) for (const w of u.w || []) all.push({ uid, ...w,
     nb: u.nb !== undefined ? u.nb : u.n !== false,     // уведомления о BTC
     no: u.no !== undefined ? u.no : u.n !== false });   // уведомления об остальных монетах
-  if (!all.length) return;
+  diag.users = Object.keys(data.users).length; diag.wallets = all.length;
+  diag.perUser = Object.values(data.users).map((u) => ({ wallets: (u.w || []).length, notifyBtc: u.nb, notifyOther: u.no }));
+  if (!all.length) return { ...diag, error: "список кошельков пуст" };
   const minute = Math.floor(Date.now() / 60000);
   const pick = (list, per) => { if (!list.length) return []; const ch = Math.ceil(list.length / per), p = minute % ch; return list.slice(p * per, p * per + per); };
 
@@ -132,13 +145,24 @@ async function checkAll(env) {
   // сколько запросов уйдёт на первый раунд — остаток делим на быстрые проверки BTC
   const cost0 = btcFast.length + btcSlow.length + others.filter((w) => w.trx).length
     + (others.some((w) => w.sol) ? 1 : 0) + (others.some((w) => w.evm) ? CHAINS.length : 0) + 3;
-  const rounds = btcFast.length ? 1 + Math.max(0, Math.min(MAX_ROUNDS - 1, Math.floor((SUB_LIMIT - cost0) / (btcFast.length + 1)))) : 1;
+  let rounds = btcFast.length ? 1 + Math.max(0, Math.min(MAX_ROUNDS - 1, Math.floor((SUB_LIMIT - cost0) / (btcFast.length + 1)))) : 1;
 
+  if (opt.single) rounds = 1;
+  diag.rounds = rounds; diag.hot = hot.map((w) => ({ btc: !!w.btc, trx: !!w.trx, sol: !!w.sol, created: w.t ? new Date(w.t).toISOString() : null }));
   const seen = (await env.KV.get("seen", "json")) || { tx: {}, addr: {} };
   const bal = (await env.KV.get("bal", "json")) || {};
   let seenCh = false, balCh = false, sub = 0;
   let found = [];
-  const get = async (url, opt) => { sub++; const r = await fetch(url, opt); if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); };
+  const get = async (url, o) => {
+    sub++;
+    const host = new URL(url).hostname;
+    const s = (diag.api[host] = diag.api[host] || { ok: 0, err: [] });
+    try {
+      const r = await fetch(url, o);
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const j = await r.json(); s.ok++; return j;
+    } catch (e) { if (s.err.length < 3) s.err.push(String(e.message || e).slice(0, 80)); throw e; }
+  };
 
   // ---- BTC ----
   function btcTx(w, tx, first) {
@@ -256,7 +280,9 @@ async function checkAll(env) {
           return `«${esc(f.label)}»: <b>+${amt} ${f.sym}</b> (${f.net})` + (usd != null ? ` ≈ $${usd.toFixed(2)}` : "") + (f.extra ? `\n   ${f.extra}` : "");
         });
         const head = list.every((f) => f.stage === 1) ? "✅ <b>Подтверждено</b>" : "💰 <b>Поступление</b>";
-        sub++; await send(env, Number(uid), head + `\n\n` + lines.join("\n"), true);
+        sub++; diag.found += list.length;
+        const rs = await send(env, Number(uid), head + `\n\n` + lines.join("\n"), true);
+        diag.sent.push(rs.ok ? "ok" : String(rs.description || "ошибка").slice(0, 80));
       }
     }
     if (seenCh) {
@@ -280,6 +306,11 @@ async function checkAll(env) {
     await Promise.all(btcFast.map(btcQuick));
     await flush();
   }
+  diag.sub = sub; diag.seenAddr = Object.keys(seen.addr).length; diag.balKeys = Object.keys(bal).length;
+  // сохраняем диагностику не каждый раз — у бесплатного KV лимит 1000 записей в день
+  if (!opt.single && (minute % 10 === 0 || diag.sent.length || Object.values(diag.api).some((a) => a.err.length && minute % 2 === 0)))
+    await env.KV.put("diag", JSON.stringify(diag));
+  return diag;
 }
 
 // ---------- общее ----------
