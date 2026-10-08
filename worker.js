@@ -56,7 +56,7 @@ export default {
       if (url.pathname === "/diag") {
         if (!env.KV) return json({ ok: false, kv: false });
         if (url.searchParams.get("run") === "1") return json(await checkAll(env, { single: true }));
-        return json({ ok: true, last: await env.KV.get("diag", "json") });
+        return json({ ok: true, beat: await env.KV.get("beat", "json"), last: await env.KV.get("diag", "json") });
       }
       return json({ ok: true, info: "Seed bot server работает", kv: !!env.KV });
     }
@@ -114,7 +114,18 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    await checkAll(withKV(env));
+    env = withKV(env);
+    const beat = { start: new Date().toISOString(), step: "start" };
+    // отметка о запуске по расписанию — раз в 10 минут (бережём лимит записей KV)
+    const mark = Math.floor(Date.now() / 60000) % 10 === 0;
+    if (mark && env.KV) await env.KV.put("beat", JSON.stringify(beat));
+    try {
+      const d = await checkAll(env, { beat });
+      if (mark && env.KV) await env.KV.put("beat", JSON.stringify({ ...beat, step: "done", end: new Date().toISOString(), rounds: d && d.rounds, sub: d && d.sub, sent: d && d.sent }));
+    } catch (e) {
+      if (env.KV) await env.KV.put("beat", JSON.stringify({ ...beat, step: "error", end: new Date().toISOString(), error: String(e && e.stack || e).slice(0, 300) }));
+      throw e;
+    }
   },
 };
 
@@ -147,7 +158,7 @@ async function checkAll(env, opt = {}) {
   // сколько запросов уйдёт на первый раунд — остаток делим на быстрые проверки BTC
   const cost0 = btcFast.length + btcSlow.length + others.filter((w) => w.trx).length
     + (others.some((w) => w.sol) ? 1 : 0) + (others.some((w) => w.evm) ? CHAINS.length : 0) + 3;
-  let rounds = btcFast.length ? 1 + Math.max(0, Math.min(MAX_ROUNDS - 1, Math.floor((SUB_LIMIT - cost0) / (btcFast.length + 1)))) : 1;
+  let rounds = btcFast.length ? 1 + Math.max(0, Math.min(MAX_ROUNDS - 1, Math.floor((SUB_LIMIT - cost0) / (btcFast.length + 2)))) : 1;
 
   if (opt.single) rounds = 1;
   diag.rounds = rounds; diag.hot = hot.map((w) => ({ btc: !!w.btc, trx: !!w.trx, sol: !!w.sol, created: w.t ? new Date(w.t).toISOString() : null }));
@@ -183,14 +194,13 @@ async function checkAll(env, opt = {}) {
     const net = inSat - outSat;
     seenCh = true;
     if (first || net <= 0) { seen.tx[key] = { t: Date.now(), c: 1 }; return; }
-    if (!conf) { seen.tx[key] = { t: Date.now(), c: 0, n: net }; btcFound(w, net, 0, tx.txid); }
-    else { seen.tx[key] = { t: rec ? rec.t : Date.now(), c: 1 }; btcFound(w, net, 1, tx.txid); }
+    if (!conf) { seen.tx[key] = { t: Date.now(), c: 0, n: net }; btcFound(w, net, 0, tx.txid, key, null); }
+    else { seen.tx[key] = { t: rec ? rec.t : Date.now(), c: 1 }; btcFound(w, net, 1, tx.txid, key, rec || null); }
   }
-  function btcFound(w, net, stage, txid) {
+  // prev — запись времени ожидания (курс при поступлении, минимум, максимум), если она была
+  function btcFound(w, net, stage, txid, key, prev) {
     if (!w.nb) return;
-    const link = ` · <a href="https://mempool.space/tx/${txid}">tx</a>`;
-    found.push({ uid: w.uid, label: w.label, amount: BigInt(net), dec: 8, sym: "BTC", net: "Bitcoin", cg: "bitcoin", stage,
-      extra: stage === 0 ? "⏳ в мемпуле, 0 подтверждений" + link : "✅ 1 подтверждение" + link });
+    found.push({ uid: w.uid, label: w.label, amount: BigInt(net), dec: 8, sym: "BTC", net: "Bitcoin", cg: "bitcoin", stage, txid, key, prev });
   }
   // полная проверка адреса: все последние транзакции
   async function btcFull(w) {
@@ -210,7 +220,7 @@ async function checkAll(env, opt = {}) {
       const txid = k.split(":")[1];
       let st; try { st = await get(`https://mempool.space/api/tx/${txid}/status`); } catch { return; }
       const rec = seen.tx[k];
-      if (st.confirmed && rec && rec.c === 0) { seen.tx[k] = { t: rec.t, c: 1 }; seenCh = true; btcFound(w, rec.n || 0, 1, txid); }
+      if (st.confirmed && rec && rec.c === 0) { seen.tx[k] = { t: rec.t, c: 1 }; seenCh = true; btcFound(w, rec.n || 0, 1, txid, k, rec); }
     })());
     await Promise.all(tasks);
   }
@@ -283,18 +293,68 @@ async function checkAll(env, opt = {}) {
     await Promise.all(jobs);
   }
 
+  // ---- курс BTC за время ожидания (от 0 до 1 подтверждения) ----
+  let roundPx = null, priceCh = false;
+  async function btcPrice() {
+    if (roundPx) return roundPx;
+    try {
+      roundPx = await firstOk([
+        async () => { const j = await get("https://mempool.space/api/v1/prices"); if (!(j.USD > 0)) throw new Error("price"); return j.USD; },
+        async () => { const j = await get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"); return j.bitcoin.usd; },
+      ]);
+    } catch { roundPx = null; }
+    return roundPx;
+  }
+  // записываем курс в ожидающие транзакции: запоминаем минимум и максимум со временем
+  async function samplePrice() {
+    const pend = Object.values(seen.tx).filter((r) => r && typeof r === "object" && r.c === 0 && r.p0);
+    if (!pend.length) return;
+    const p = await btcPrice(); if (!p) return;
+    const now = Date.now();
+    for (const r of pend) {
+      if (p < r.lo) { r.lo = p; r.tlo = now; priceCh = true; }
+      if (p > r.hi) { r.hi = p; r.thi = now; priceCh = true; }
+    }
+  }
+  const usd = (v) => "$" + Math.round(v).toLocaleString("ru-RU");
+  const usd2 = (v) => "$" + v.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const hm = (ts) => new Date(ts).toLocaleTimeString("ru-RU", { timeZone: "Europe/Moscow", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  function btcLines(f, p) {
+    const btc = Number(f.amount) / 1e8;
+    const link = ` · <a href="https://mempool.space/tx/${f.txid}">tx</a>`;
+    if (f.stage === 0) {
+      return (p ? ` ≈ ${usd2(btc * p)}` : "") + `\n   ⏳ в мемпуле, 0 подтверждений` + (p ? ` · курс ${usd(p)}` : "") + link;
+    }
+    let s = (p ? ` ≈ ${usd2(btc * p)}` : "") + `\n   ✅ 1 подтверждение` + link;
+    const r = f.prev;
+    if (r && r.p0) {
+      const lo = p ? Math.min(r.lo, p) : r.lo, hi = p ? Math.max(r.hi, p) : r.hi;
+      const tlo = p && p < r.lo ? Date.now() : r.tlo, thi = p && p > r.hi ? Date.now() : r.thi;
+      const mins = Math.max(1, Math.round((Date.now() - r.t) / 60000));
+      s += `\n   За ожидание (${mins} мин):` +
+        `\n   📉 минимум: ${usd2(btc * lo)} (${hm(tlo)})` +
+        `\n   📈 максимум: ${usd2(btc * hi)} (${hm(thi)})`;
+    }
+    return s;
+  }
+
   // ---- отправка и сохранение ----
   let px = null;
   async function flush() {
     if (found.length) {
       const list0 = found; found = [];
-      if (!px) { try { px = await get(`https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,tether,tron,solana,ethereum,binancecoin,polygon-ecosystem-token&vs_currencies=usd`); } catch { px = {}; } }
+      const bp = list0.some((f) => f.sym === "BTC") ? await btcPrice() : null;
+      for (const f of list0) if (f.sym === "BTC" && f.stage === 0 && bp && seen.tx[f.key]) {
+        Object.assign(seen.tx[f.key], { p0: bp, lo: bp, hi: bp, tlo: Date.now(), thi: Date.now() }); seenCh = true;
+      }
+      if (list0.some((f) => f.sym !== "BTC") && !px) { try { px = await get(`https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,tether,tron,solana,ethereum,binancecoin,polygon-ecosystem-token&vs_currencies=usd`); } catch { px = {}; } }
       const byUser = {};
       for (const f of list0) (byUser[f.uid] = byUser[f.uid] || []).push(f);
       for (const [uid, list] of Object.entries(byUser)) {
         const lines = list.map((f) => {
           const amt = fmtUnits(f.amount, f.dec);
-          const usd = px[f.cg] && px[f.cg].usd ? Number(amt) * px[f.cg].usd : null;
+          if (f.sym === "BTC") return `«${esc(f.label)}»: <b>+${amt} BTC</b>` + btcLines(f, bp);
+          const usd = px && px[f.cg] && px[f.cg].usd ? Number(amt) * px[f.cg].usd : null;
           return `«${esc(f.label)}»: <b>+${amt} ${f.sym}</b> (${f.net})` + (usd != null ? ` ≈ $${usd.toFixed(2)}` : "") + (f.extra ? `\n   ${f.extra}` : "");
         });
         const head = list.every((f) => f.stage === 1) ? "✅ <b>Подтверждено</b>" : "💰 <b>Поступление</b>";
@@ -309,10 +369,12 @@ async function checkAll(env, opt = {}) {
       await env.KV.put("seen", JSON.stringify(seen)); seenCh = false;
     }
     if (balCh) { await env.KV.put("bal", JSON.stringify(bal)); balCh = false; }
+    roundPx = null;
   }
 
   // раунд 0: полная проверка BTC и остальные монеты
   const start = Date.now();
+  await samplePrice();
   await Promise.all([...btcFast.map(btcFull), ...btcSlow.map(btcFull), othersCheck()]);
   await flush();
   // следующие раунды: только BTC, каждые ~10 секунд, пока хватает лимита запросов
@@ -320,10 +382,13 @@ async function checkAll(env, opt = {}) {
   for (let r = 1; r < rounds; r++) {
     const wait = start + r * step - Date.now();
     if (wait > 0) await new Promise((res) => setTimeout(res, wait));
-    if (sub + btcFast.length + 1 > SUB_LIMIT) break;
+    if (sub + btcFast.length + 2 > SUB_LIMIT) break;
+    await samplePrice();
     await Promise.all(btcFast.map(btcQuick));
     await flush();
   }
+  // минимум/максимум курса сохраняем раз в минуту, а не каждые 6 секунд — бережём лимит записей KV
+  if (priceCh) { await env.KV.put("seen", JSON.stringify(seen)); priceCh = false; }
   diag.sub = sub; diag.seenAddr = Object.keys(seen.addr).length; diag.balKeys = Object.keys(bal).length;
   // сохраняем диагностику не каждый раз — у бесплатного KV лимит 1000 записей в день
   if (!opt.single && (minute % 10 === 0 || diag.sent.length || Object.values(diag.api).some((a) => a.err.length && minute % 2 === 0)))
