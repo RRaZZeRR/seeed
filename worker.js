@@ -24,15 +24,15 @@ const OLD_PER_RUN = 3;     // старые кошельки: сколько пр
 
 const USDT_TRC20 = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
 const CHAINS = [
-  { id: "eth", name: "Ethereum", rpc: "https://ethereum-rpc.publicnode.com", native: { sym: "ETH", dec: 18, cg: "ethereum" },
+  { id: "eth", name: "Ethereum", rpc: ["https://ethereum-rpc.publicnode.com", "https://eth.llamarpc.com", "https://cloudflare-eth.com"], native: { sym: "ETH", dec: 18, cg: "ethereum" },
     tokens: [{ sym: "USDT", a: "0xdAC17F958D2ee523a2206206994597C13D831ec7", dec: 6 }, { sym: "USDC", a: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", dec: 6 }] },
-  { id: "bsc", name: "BNB Chain", rpc: "https://bsc-rpc.publicnode.com", native: { sym: "BNB", dec: 18, cg: "binancecoin" },
+  { id: "bsc", name: "BNB Chain", rpc: ["https://bsc-rpc.publicnode.com", "https://bsc-dataseed.bnbchain.org", "https://binance.llamarpc.com"], native: { sym: "BNB", dec: 18, cg: "binancecoin" },
     tokens: [{ sym: "USDT", a: "0x55d398326f99059fF775485246999027B3197955", dec: 18 }, { sym: "USDC", a: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d", dec: 18 }] },
-  { id: "pol", name: "Polygon", rpc: "https://polygon-bor-rpc.publicnode.com", native: { sym: "POL", dec: 18, cg: "polygon-ecosystem-token" },
+  { id: "pol", name: "Polygon", rpc: ["https://polygon-bor-rpc.publicnode.com", "https://polygon.llamarpc.com", "https://polygon-rpc.com"], native: { sym: "POL", dec: 18, cg: "polygon-ecosystem-token" },
     tokens: [{ sym: "USDT", a: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", dec: 6 }, { sym: "USDC", a: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", dec: 6 }] },
-  { id: "arb", name: "Arbitrum", rpc: "https://arbitrum-one-rpc.publicnode.com", native: { sym: "ETH", dec: 18, cg: "ethereum" },
+  { id: "arb", name: "Arbitrum", rpc: ["https://arbitrum-one-rpc.publicnode.com", "https://arbitrum.llamarpc.com", "https://arb1.arbitrum.io/rpc"], native: { sym: "ETH", dec: 18, cg: "ethereum" },
     tokens: [{ sym: "USDT", a: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", dec: 6 }, { sym: "USDC", a: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", dec: 6 }] },
-  { id: "base", name: "Base", rpc: "https://base-rpc.publicnode.com", native: { sym: "ETH", dec: 18, cg: "ethereum" },
+  { id: "base", name: "Base", rpc: ["https://base-rpc.publicnode.com", "https://base.llamarpc.com", "https://mainnet.base.org"], native: { sym: "ETH", dec: 18, cg: "ethereum" },
     tokens: [{ sym: "USDC", a: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", dec: 6 }] },
 ];
 
@@ -154,15 +154,19 @@ async function checkAll(env, opt = {}) {
   let seenCh = false, balCh = false, sub = 0;
   let found = [];
   const get = async (url, o) => {
+    if (sub >= SUB_LIMIT) throw new Error("лимит запросов");
     sub++;
     const host = new URL(url).hostname;
     const s = (diag.api[host] = diag.api[host] || { ok: 0, err: [] });
     try {
-      const r = await fetch(url, o);
+      const r = await fetch(url, { ...(o || {}), signal: AbortSignal.timeout(8000) });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const j = await r.json(); s.ok++; return j;
     } catch (e) { if (s.err.length < 3) s.err.push(String(e.message || e).slice(0, 80)); throw e; }
   };
+
+  // пробуем источники по очереди, пока какой-то не ответит (публичные сервисы иногда отвечают 429)
+  const firstOk = async (fns) => { let last; for (const f of fns) { try { return await f(); } catch (e) { last = e; } } throw last; };
 
   // ---- BTC ----
   function btcTx(w, tx, first) {
@@ -227,18 +231,37 @@ async function checkAll(env, opt = {}) {
   async function othersCheck() {
     const jobs = [];
     for (const w of others) if (w.trx) jobs.push((async () => {
-      let j; try { j = await get(`https://api.trongrid.io/v1/accounts/${w.trx}`); } catch { return; }
-      if (!j || j.success === false) return;
       let trx = 0n, usdt = 0n;
-      const d = j.data && j.data[0];
-      if (d) { trx = BigInt(d.balance || 0); for (const o of d.trc20 || []) if (o[USDT_TRC20] != null) usdt = BigInt(o[USDT_TRC20]); }
+      try {
+        [trx, usdt] = await firstOk([
+          async () => {
+            const j = await get(`https://api.trongrid.io/v1/accounts/${w.trx}`);
+            if (!j || j.success === false) throw new Error("trongrid");
+            const d = j.data && j.data[0]; let a = 0n, b = 0n;
+            if (d) { a = BigInt(d.balance || 0); for (const o of d.trc20 || []) if (o[USDT_TRC20] != null) b = BigInt(o[USDT_TRC20]); }
+            return [a, b];
+          },
+          async () => {
+            const j = await get(`https://apilist.tronscanapi.com/api/account/tokens?address=${w.trx}&start=0&limit=50`);
+            if (!j || !Array.isArray(j.data)) throw new Error("tronscan");
+            let a = 0n, b = 0n;
+            for (const x of j.data) {
+              if (x.tokenId === "_") a = BigInt(String(x.balance || "0").split(".")[0]);
+              if (x.tokenId === USDT_TRC20) b = BigInt(String(x.balance || "0").split(".")[0]);
+            }
+            return [a, b];
+          },
+        ]);
+      } catch { return; }
       diff(w, w.trx, "usdt", usdt, 6, "USDT", "TRC20", "tether", 10000n);
       diff(w, w.trx, "trx", trx, 6, "TRX", "TRON", "tron", 100000n);
     })());
     const solW = others.filter((w) => w.sol);
     if (solW.length) jobs.push((async () => {
-      let j; try { j = await get("https://solana-rpc.publicnode.com", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [solW.map((w) => w.sol), { encoding: "base64", commitment: "processed" }] }) }); } catch { return; }
+      const so = { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getMultipleAccounts", params: [solW.map((w) => w.sol), { encoding: "base64", commitment: "processed" }] }) };
+      let j; try { j = await firstOk(["https://solana-rpc.publicnode.com", "https://api.mainnet-beta.solana.com"].map((u) => async () => {
+        const x = await get(u, so); if (!x.result) throw new Error("rpc"); return x; })); } catch { return; }
       if (!j.result || !Array.isArray(j.result.value)) return;
       solW.forEach((w, i) => { const acc = j.result.value[i]; diff(w, w.sol, "sol", acc ? acc.lamports : 0, 9, "SOL", "Solana", "solana", 100000n); });
     })());
@@ -254,8 +277,9 @@ async function checkAll(env, opt = {}) {
           meta.push({ w, asset: c.id + ":" + t.sym, dec: t.dec, sym: t.sym, cg: "tether", min: 10n ** BigInt(t.dec - 2) });
         }
       }
-      let res; try { res = await get(c.rpc, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(calls) }); } catch { return; }
-      if (!Array.isArray(res)) return;
+      const eo = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(calls) };
+      let res; try { res = await firstOk(c.rpc.map((u) => async () => {
+        const x = await get(u, eo); if (!Array.isArray(x) || x.some((y) => y.error)) throw new Error("batch"); return x; })); } catch { return; }
       for (const x of res) {
         const m = meta[x.id];
         if (!m || typeof x.result !== "string" || !/^0x[0-9a-fA-F]*$/.test(x.result)) continue;
