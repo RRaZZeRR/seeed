@@ -87,11 +87,6 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
 .qty .presets{display:flex;gap:6px}
 .qty span.lbl{font-size:13px;color:var(--muted)}
 progress{width:100%;height:6px;accent-color:var(--accent)}
-.bt{display:grid;grid-template-columns:auto 1fr;gap:4px 10px;align-items:start;border:1px solid var(--line);border-radius:8px;padding:10px;cursor:pointer}
-.bt input{margin-top:3px}
-.bt b{font-size:14px}
-.bt code{grid-column:2;font:12px var(--mono);color:var(--muted);overflow-wrap:anywhere}
-.bt.on{border-color:var(--accent)}
 </style>
 </head>
 <body>
@@ -105,12 +100,6 @@ progress{width:100%;height:6px;accent-color:var(--accent)}
     <label class="check"><input id="rem" type="checkbox"> Запомнить на этом телефоне</label>
   </section>
 
-  <section aria-labelledby="hbt">
-    <h2 id="hbt">Формат BTC-адреса</h2>
-    <p class="sub" style="margin:0">Выберите тот, что показывает SafePal для этой же фразы. Все варианты принадлежат вашей фразе — меняется только вид адреса.</p>
-    <div id="btcTypes" style="display:grid;gap:8px"></div>
-    <p id="m4" class="msg" role="status"></p>
-  </section>
 
   <section aria-labelledby="hn">
     <h2 id="hn">Новый кошелёк</h2>
@@ -572,59 +561,23 @@ async function migrateEvm(){
 }
 $("pw").addEventListener("change", migrateEvm);
 
-/* ---------- формат BTC-адреса ---------- */
-const BT = [["native","Native SegWit","bc1q…"],["nested","Nested SegWit","3…"],["legacy","Legacy","1…"],["taproot","Taproot","bc1p…"]];
-let btcType = "native", btSamples = null;
-function renderBtcTypes(){
-  const box = $("btcTypes"); box.innerHTML = "";
-  for (const [k, name, pre] of BT){
-    const l = el("label", "bt" + (k === btcType ? " on" : ""));
-    const r = document.createElement("input"); r.type = "radio"; r.name = "bt"; r.value = k; r.checked = k === btcType;
-    r.onchange = () => setBtcType(k);
-    l.append(r, el("b", null, name + " — " + pre));
-    l.append(el("code", null, btSamples ? btSamples[k] : (wallets.length ? "введите пароль, чтобы увидеть адрес последнего кошелька" : "пример появится после создания кошелька")));
-    box.appendChild(l);
-  }
-}
-async function loadBtcSamples(){
-  if (!wallets.length || !$("pw").value) { btSamples = null; renderBtcTypes(); return; }
-  try { btSamples = SeedDerive.btcAll((await decrypt(wallets[0].c, $("pw").value)).join(" ")); } catch(e){ btSamples = null; }
-  renderBtcTypes();
-  if (btSamples) msg($("m4"), "Адреса показаны для «" + wallets[0].label + "». Сравните с BTC-адресом этого кошелька в SafePal.", "");
-}
-async function loadBtcType(){
-  try { const v = await store.get(["s_btctype"]); if (BT.some(x => x[0] === v.s_btctype)) btcType = v.s_btctype; } catch(e){}
-  renderBtcTypes();
-}
-// перевести все кошельки на выбранный формат (нужен пароль — адрес считается из фразы)
+/* ---------- BTC-адрес: всегда Native SegWit (bc1q…) ---------- */
+const btcType = "native";
+// кошельки, у которых раньше выбирали другой формат, возвращаем на bc1q (нужен пароль — адрес считается из фразы)
 async function convertBtc(){
   const pw = $("pw").value;
-  const todo = wallets.filter(w => (w.bt || "native") !== btcType);
-  if (!todo.length) return 0;
-  if (!pw){ msg($("m4"), "Введите пароль — без него не пересчитать адреса старых кошельков.", "err"); return -1; }
+  const todo = wallets.filter(w => (w.bt || "native") !== "native");
+  if (!todo.length || !pw) return 0;
   let done = 0;
   for (const w of todo){
     try {
-      const words = (await decrypt(w.c, pw)).join(" ");
-      w.a.btc = SeedDerive.btcAll(words)[btcType]; w.bt = btcType;
-      delete bal.w[w.k];
-      await saveWallet(w); done++;
+      w.a.btc = SeedDerive.btcAll((await decrypt(w.c, pw)).join(" ")).native; w.bt = "native";
+      delete bal.w[w.k]; await saveWallet(w); done++;
     } catch(e){}
   }
   return done;
 }
-async function setBtcType(k){
-  btcType = k; renderBtcTypes();
-  try { await store.set("s_btctype", k); } catch(e){}
-  msg($("m4"), "Пересчитываю BTC-адреса…");
-  const n = await convertBtc();
-  if (n >= 0){
-    renderList(); syncWatch();
-    msg($("m4"), "Формат BTC: " + BT.find(x => x[0] === k)[1] + (n ? " — обновлено кошельков: " + n : "") + ". Уведомления теперь следят за этими адресами.", "ok");
-    if (n) refreshBalances();
-  }
-}
-$("pw").addEventListener("change", async () => { await loadBtcSamples(); const n = await convertBtc(); if (n > 0){ renderList(); syncWatch(); } });
+$("pw").addEventListener("change", async () => { const n = await convertBtc(); if (n > 0){ renderList(); syncWatch(); } });
 
 /* ---------- создание ---------- */
 function setN(v){ n = v; $("n12").setAttribute("aria-pressed", v===12); $("n24").setAttribute("aria-pressed", v===24); }
@@ -680,7 +633,6 @@ $("gen").onclick = async () => {
     if (sendErr) parts.push("бот не отправил: " + sendErr);
     msg($("m1"), parts.join(" · ") + ".", (saved === q && !sendErr) ? "ok" : "err");
     syncWatch();
-    loadBtcSamples();
     $("label").value = "";
   } catch(e){ msg($("m1"), "Ошибка: " + e.message, "err"); }
   $("prog").hidden = true;
@@ -714,7 +666,7 @@ entropyToMnemonic(new Uint8Array(16)).then(w => {
     SeedDerive.addresses(w.join(" ")).trx === "TUEZSdKsoDHQMeZwihtdoBiN46zxhGWYdH";
   if (!ok){ $("gen").disabled = true; msg($("m1"), "Ошибка самопроверки, создание отключено.", "err"); }
 });
-loadList().then(async () => { await loadNotify(); await loadBtcType(); const cn = await convertBtc(); if (cn > 0) renderList(); syncWatch(); migrateEvm(); loadBtcSamples(); if (wallets.length && Date.now() - (bal.t || 0) > 10*60*1000) refreshBalances(); });
+loadList().then(async () => { await loadNotify(); const cn = await convertBtc(); if (cn > 0) renderList(); syncWatch(); migrateEvm(); if (wallets.length && Date.now() - (bal.t || 0) > 10*60*1000) refreshBalances(); });
 </script>
 </body>
 </html>
