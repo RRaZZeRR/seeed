@@ -87,6 +87,13 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
 .qty .presets{display:flex;gap:6px}
 .qty span.lbl{font-size:13px;color:var(--muted)}
 progress{width:100%;height:6px;accent-color:var(--accent)}
+#pwBox summary{display:flex;justify-content:space-between;align-items:center;gap:8px;list-style:none;font:500 13px var(--sans);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+#pwBox summary::-webkit-details-marker{display:none}
+#pwBox summary::after{content:"▸";font-size:14px;transition:transform .15s}
+#pwBox[open] summary::after{transform:rotate(90deg)}
+.pwstate{margin-left:auto;text-transform:none;letter-spacing:0;font-size:13px}
+.pwstate.ok{color:var(--ok)} .pwstate.no{color:var(--warn)}
+.bal.total{font-weight:700;color:var(--fg);border-color:var(--fg)}
 .more-btn{justify-self:start}
 .more-addrs{display:grid;gap:6px}
 </style>
@@ -94,12 +101,16 @@ progress{width:100%;height:6px;accent-color:var(--accent)}
 <body>
 <main>
 
-  <section aria-labelledby="hp">
-    <h2 id="hp">Пароль шифрования</h2>
-    <label>Без этого пароля сохранённые фразы не открыть
-      <input id="pw" type="password" autocomplete="new-password" placeholder="от 8 символов, лучше 12+">
-    </label>
-    <label class="check"><input id="rem" type="checkbox"> Запомнить на этом телефоне</label>
+  <section>
+    <details id="pwBox">
+      <summary><span>🔒 Пароль шифрования</span><span id="pwState" class="pwstate"></span></summary>
+      <div style="display:grid;gap:12px;margin-top:12px">
+        <label>Без этого пароля сохранённые фразы не открыть
+          <input id="pw" type="password" autocomplete="new-password" placeholder="от 8 символов, лучше 12+">
+        </label>
+        <label class="check"><input id="rem" type="checkbox"> Запомнить на этом телефоне</label>
+      </div>
+    </details>
   </section>
 
 
@@ -157,8 +168,6 @@ progress{width:100%;height:6px;accent-color:var(--accent)}
       <input id="q" type="search" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Поиск по названию или адресу">
       <div class="chips" role="group" aria-label="Фильтр">
         <button class="chip" data-f="all" aria-pressed="true">Все</button>
-        <button class="chip" data-f="todo" aria-pressed="false">Не в SafePal</button>
-        <button class="chip" data-f="done" aria-pressed="false">В SafePal</button>
         <button class="chip" data-f="funded" aria-pressed="false">С балансом</button>
       </div>
     </div>
@@ -219,7 +228,7 @@ const TG = (window.Telegram && Telegram.WebApp && Telegram.WebApp.initData) ? Te
 if (TG){ try{ TG.ready(); TG.expand(); }catch(e){} }
 const UID = TG && TG.initDataUnsafe && TG.initDataUnsafe.user ? "_" + TG.initDataUnsafe.user.id : "";
 const LS_PW = "seed_pw" + UID;
-let n = 12, current = null, wallets = [];
+let n = 12, current = null, currentW = null, wallets = [];
 
 function msg(el, t, cls){ el.textContent = t; el.className = "msg " + (cls||""); }
 function el(tag, cls, txt){ const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; }
@@ -336,6 +345,14 @@ function shareText(w){
     NAMES_MAIN.filter(([k]) => w.a[k]).map(([k, n]) => n + ": " + w.a[k]).join("\n") + "\n\nСид (зашифрован):\n" + w.c;
 }
 
+async function markImported(w, badge){
+  if (w.imp) return;
+  w.imp = true;
+  try { await saveWallet(w); } catch(e){ w.imp = false; return; }
+  if (badge){ badge.className = "badge done"; badge.textContent = "✓ В SafePal"; }
+  const done = wallets.filter(x => x.imp).length;
+  $("count").textContent = wallets.length ? (done + " из " + wallets.length + " в SafePal") : "";
+}
 function renderList(){
   const box = $("list"); box.innerHTML = "";
   const done = wallets.filter(w => w.imp).length;
@@ -366,13 +383,13 @@ function renderList(){
     show.onclick = async () => {
       if (!words.hidden){ words.hidden = true; show.textContent = "Показать фразу"; return; }
       const pw = $("pw").value;
-      if (!pw){ msg(out, "Введите пароль в блоке «Пароль шифрования» вверху.", "err"); return; }
+      if (!pw){ msg(out, "Введите пароль в блоке «Пароль шифрования» вверху.", "err"); askPw(); return; }
       show.disabled = true; msg(out, "Расшифровываю…");
       try { const ws = await decrypt(w.c, pw); renderWords(words, ws); show.textContent = "Скрыть фразу"; msg(out, ""); }
       catch(e){ msg(out, "Пароль не подходит к этому кошельку.", "err"); }
       show.disabled = false;
     };
-    const needPw = () => { if (!$("pw").value){ msg(out, "Введите пароль в блоке «Пароль шифрования» вверху.", "err"); return true; } return false; };
+    const needPw = () => { if (!$("pw").value){ msg(out, "Введите пароль в блоке «Пароль шифрования» вверху.", "err"); askPw(); return true; } return false; };
     const phrase = () => decrypt(w.c, $("pw").value).then(ws => ws.join(" "));
     const sp = el("button","btn small primary","Открыть в SafePal");
     sp.onclick = async () => {
@@ -383,12 +400,12 @@ function renderList(){
       openSafePal(out);
     };
     const cp = el("button","btn small","Копировать фразу");
-    cp.onclick = () => { if (!needPw()) { msg(out, "Расшифровываю…"); copyLater(phrase(), out, "Фраза скопирована. Вставьте в SafePal → Импорт кошелька."); } };
-    const mk = el("button","btn small primary","✓ Импортирован");
-    mk.onclick = async () => {
-      w.imp = !w.imp;
-      try { await saveWallet(w); renderList(); }
-      catch(e){ w.imp = !w.imp; msg(out, "Не удалось сохранить отметку, попробуйте ещё раз.", "err"); }
+    // скопировали фразу — считаем, что кошелёк импортирован в SafePal
+    cp.onclick = async () => {
+      if (needPw()) return;
+      msg(out, "Расшифровываю…");
+      const ok = await copyLater(phrase(), out, "Фраза скопирована. Вставьте в SafePal → Импорт кошелька.");
+      if (ok) await markImported(w, badge);
     };
     const fw = el("button","btn small","В чат");
     fw.onclick = () => {
@@ -401,7 +418,6 @@ function renderList(){
       try { await store.del(w.k); wallets = wallets.filter(x => x.k !== w.k); renderList(); syncWatch(); msg($("m2"), "Кошелёк удалён из списка. Сообщение в Telegram осталось.", "ok"); }
       catch(e){ msg(out, "Не получилось удалить, попробуйте ещё раз.", "err"); }
     };
-    if (!w.imp) row.append(mk);
     row.append(show, cp, del);
     card.append(head, bl, ad, row, words, out);
     box.appendChild(card);
@@ -519,12 +535,21 @@ const CHIPS_MAIN = [["usdt","USDT TRC20",2], ["trx","TRX",2], ["btc","BTC",8], [
 const CHIPS_MORE = [["eth","ETH",6], ["bnb","BNB",6], ["usdtE","USDT ERC20",2], ["usdcE","USDC ERC20",2], ["dai","DAI",2],
   ["usdtB","USDT BEP20",2], ["usdcB","USDC BEP20",2], ["usdtS","USDT SOL",2], ["usdcS","USDC SOL",2],
   ["ltc","LTC",6], ["doge","DOGE",2], ["xrp","XRP",4], ["atom","ATOM",4]];
+// баланс кошелька: сначала общий в $, рядом — каждая монета, на которой что-то есть, тоже в $
+const pxOf = k => bal.px && bal.px[k] != null ? bal.px[k] : (STABLE.includes(k) ? 1 : null);
+function fmtCoinUsd(v){ return v > 0 && v < 0.01 ? "<$0,01" : fmtUsd(v); }
 function balChips(w){
   const b = bal.w[w.k], box = el("div","bals");
   if (!b){ box.appendChild(el("span","bal","Баланс: нажмите «Обновить балансы»")); return box; }
-  for (const [k, n, d] of CHIPS_MAIN){ const v = b[k]; box.appendChild(el("span", "bal" + (v > 0 ? " pos" : ""), n + " " + fmtAmt(v, d))); }
-  for (const [k, n, d] of CHIPS_MORE) if (b[k] > 0) box.appendChild(el("span", "bal pos", n + " " + fmtAmt(b[k], d)));
-  const u = usdOf(b); if (u != null) box.appendChild(el("span","bal usd","≈ " + fmtUsd(u)));
+  const u = usdOf(b);
+  box.appendChild(el("span","bal total", u != null ? fmtUsd(u) : "—"));
+  for (const [k, n, d] of CHIPS_MAIN.concat(CHIPS_MORE)){
+    const v = b[k]; if (!(v > 0)) continue;
+    const p = pxOf(k);
+    const c = el("span", "bal pos", n + " " + (p != null ? fmtCoinUsd(v * p) : fmtAmt(v, d)));
+    c.title = fmtAmt(v, d) + " " + n;
+    box.appendChild(c);
+  }
   return box;
 }
 let balBusy = false;
@@ -692,7 +717,7 @@ async function makeWallet(label, pw){
 
 $("gen").onclick = async () => {
   const pw = $("pw").value;
-  if (pw.length < 8){ msg($("m1"), "Сначала задайте пароль шифрования (от 8 символов) — без него кошелёк не сохранить.", "err"); $("pw").focus(); return; }
+  if (pw.length < 8){ msg($("m1"), "Сначала задайте пароль шифрования (от 8 символов) — без него кошелёк не сохранить.", "err"); askPw(); return; }
   const q = getQ(), base = $("label").value.trim(), start = wallets.length;
   $("gen").disabled = true; $("qm").disabled = $("qp").disabled = true;
   let saved = 0, sent = 0, sendErr = "", botOn = null;
@@ -703,7 +728,7 @@ $("gen").onclick = async () => {
       const label = base ? (q > 1 ? base + " " + (i+1) : base) : ("Кошелёк " + (start + i + 1));
       const {w, words} = await makeWallet(label, pw);
       if (q === 1){
-        current = words;
+        current = words; currentW = w;
         $("newTitle").textContent = label; $("newDate").textContent = fmtDate(w.t);
         renderWords($("words"), words); $("words").classList.remove("blur"); $("hide").textContent = "Скрыть";
         renderAddrs($("addrs"), w.a, $("m1"));
@@ -727,19 +752,32 @@ $("gen").onclick = async () => {
   $("gen").disabled = false; $("qm").disabled = $("qp").disabled = false;
 };
 $("hide").onclick = () => { const b = $("words").classList.toggle("blur"); $("hide").textContent = b ? "Показать" : "Скрыть"; };
-$("copy").onclick = () => current && copyText(current.join(" "), $("m1"), "Фраза скопирована. Вставьте в SafePal → Импорт кошелька.");
+$("copy").onclick = async () => {
+  if (!current) return;
+  await copyText(current.join(" "), $("m1"), "Фраза скопирована. Вставьте в SafePal → Импорт кошелька.");
+  if (currentW && !currentW.imp){ await markImported(currentW, null); renderList(); }
+};
 
 /* ---------- пароль ---------- */
+// плашка пароля свёрнута; открывается по нажатию или сама, когда пароль нужен
+function askPw(){ $("pwBox").open = true; $("pwBox").scrollIntoView({behavior:"smooth", block:"start"}); setTimeout(() => $("pw").focus(), 250); }
+function pwState(){
+  const v = $("pw").value, e = $("pwState");
+  e.textContent = v ? ("✓ введён" + ($("rem").checked ? ", запомнен" : "")) : "не введён";
+  e.className = "pwstate " + (v ? "ok" : "no");
+}
+$("pw").addEventListener("input", pwState); $("rem").addEventListener("change", pwState);
 try { const s = localStorage.getItem(LS_PW); if (s){ $("pw").value = s; $("rem").checked = true; } } catch(e){}
 function savePw(){ try { if ($("rem").checked && $("pw").value) localStorage.setItem(LS_PW, $("pw").value); else localStorage.removeItem(LS_PW); } catch(e){} }
 $("rem").onchange = savePw; $("pw").addEventListener("change", savePw);
+pwState();
 
 /* ---------- ручная расшифровка ---------- */
 $("dec").onclick = async () => {
   const raw = $("dIn").value.replace(/\s+/g,"").match(/sp1:([A-Za-z0-9_-]+)/i);
   $("dWords").hidden = true; $("dAddrs").hidden = true;
   if (!raw){ msg($("m3"), "Не нашёл шифр: вставьте строку целиком, она начинается с SP1:", "err"); return; }
-  if (!$("pw").value){ msg($("m3"), "Введите пароль в блоке «Пароль шифрования» вверху.", "err"); return; }
+  if (!$("pw").value){ msg($("m3"), "Введите пароль в блоке «Пароль шифрования» вверху.", "err"); askPw(); return; }
   try {
     const words = await decrypt("SP1:" + raw[1], $("pw").value);
     renderWords($("dWords"), words);
