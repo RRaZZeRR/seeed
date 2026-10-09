@@ -96,6 +96,7 @@ progress{width:100%;height:6px;accent-color:var(--accent)}
 .bal.total{font-weight:700;color:var(--fg);border-color:var(--fg)}
 .more-btn{justify-self:start}
 .more-addrs{display:grid;gap:6px}
+label.watch{font-size:13px}
 </style>
 </head>
 <body>
@@ -162,7 +163,7 @@ progress{width:100%;height:6px;accent-color:var(--accent)}
     </div>
     <div id="notifyRow" hidden style="display:grid;gap:6px">
       <label class="check"><input id="notifyBtc" type="checkbox" checked> Уведомлять о поступлении BTC</label>
-      <label class="check"><input id="notifyOther" type="checkbox" checked> Уведомлять об остальных монетах (USDT, TRX, SOL и др.)</label>
+      <label class="check"><input id="notifyOther" type="checkbox" checked> Уведомлять о USDT TRC20 и SOL</label>
     </div>
     <div class="tools" id="tools" hidden>
       <input id="q" type="search" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Поиск по названию или адресу">
@@ -305,7 +306,7 @@ async function copyLater(promise, out, ok){
   }
 }
 async function saveWallet(w){
-  await store.set(w.k, JSON.stringify({label:w.label, t:w.t, a:w.a, c:w.c, imp:!!w.imp, bt:w.bt || "native"}));
+  await store.set(w.k, JSON.stringify({label:w.label, t:w.t, a:w.a, c:w.c, imp:!!w.imp, bt:w.bt || "native", watch:!!w.watch}));
 }
 let filter = "all";
 function matches(w, q){
@@ -375,6 +376,18 @@ function renderList(){
     left.append(el("strong", null, w.label), badge);
     head.append(left, el("small", null, fmtDate(w.t)));
     const ad = el("div","addrs"); renderAddrs(ad, w.a, $("m2"));
+    // «Следить»: уведомления о поступлениях на этот кошелёк. Последний созданный отслеживается всегда.
+    const newestT = Math.max(...wallets.map(x => x.t));
+    const isNewest = w.t === newestT;
+    const wl = el("label","check watch");
+    const wc = el("input"); wc.type = "checkbox"; wc.checked = isNewest || !!w.watch; wc.disabled = isNewest;
+    wl.append(wc, document.createTextNode(isNewest ? " 👁 Следить (последний — всегда)" : " 👁 Следить за этим кошельком"));
+    wc.onchange = async () => {
+      w.watch = wc.checked;
+      try { await saveWallet(w); } catch(e){ w.watch = !wc.checked; wc.checked = w.watch; msg(out, "Не удалось сохранить, попробуйте ещё раз.", "err"); return; }
+      syncWatch();
+      msg(out, w.watch ? "Слежу за этим кошельком: BTC, USDT TRC20, SOL." : "Больше не слежу за этим кошельком.", "ok");
+    };
     const bl = balChips(w);
     const words = el("div","words"); words.hidden = true;
     const out = el("p","msg");
@@ -419,7 +432,7 @@ function renderList(){
       catch(e){ msg(out, "Не получилось удалить, попробуйте ещё раз.", "err"); }
     };
     row.append(show, cp, del);
-    card.append(head, bl, ad, row, words, out);
+    card.append(head, wl, bl, ad, row, words, out);
     box.appendChild(card);
   }
 }
@@ -623,7 +636,7 @@ async function syncWatch(){
   try {
     await fetch(WORKER_URL.replace(/\/$/,"") + "/watch", {method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({initData: TG.initData, notifyBtc, notifyOther,
-        wallets: wallets.map(w => Object.assign({label: w.label, t: w.t}, pickAddr(w.a)))})});
+        wallets: wallets.map(w => Object.assign({label: w.label, t: w.t, watch: !!w.watch}, pickAddr(w.a)))})});
   } catch(e){}
 }
 async function loadNotify(){
