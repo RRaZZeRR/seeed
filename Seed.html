@@ -87,6 +87,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:14px}
 .qty .presets{display:flex;gap:6px}
 .qty span.lbl{font-size:13px;color:var(--muted)}
 progress{width:100%;height:6px;accent-color:var(--accent)}
+.more-btn{justify-self:start}
+.more-addrs{display:grid;gap:6px}
 </style>
 </head>
 <body>
@@ -275,10 +277,12 @@ async function decrypt(c, pw){
 }
 
 /* ---------- отображение ---------- */
-const NAMES = [["trx","USDT TRC20"],["btc","BTC"],["evm","ETH · BNB · ERC20 · BEP20"],["sol","SOL · USDT/USDC SOL"],
-  ["ton","TON · USDT TON"],["ltc","LTC"],["doge","DOGE"],["xrp","XRP"],["atom","ATOM"]];
+// главные адреса — видны сразу (как в сообщении бота); остальные — по кнопке «Ещё монеты»
+const NAMES_MAIN = [["trx","USDT TRC20"],["btc","BTC"],["sol","SOL"],["evm","ETH"]];
+const NAMES_MORE = [["ltc","LTC"],["doge","DOGE"],["xrp","XRP"],["atom","ATOM"]];
+const NAMES = NAMES_MAIN.concat(NAMES_MORE);
 // поля адресов, которые уходят на сервер (solUsdt/solUsdc — токен-счета USDT/USDC в Solana)
-const ADDR_KEYS = ["trx","btc","sol","evm","ltc","doge","xrp","atom","ton","solUsdt","solUsdc"];
+const ADDR_KEYS = ["trx","btc","sol","evm","ltc","doge","xrp","atom","solUsdt","solUsdc"];
 const pickAddr = a => { const o = {}; for (const k of ADDR_KEYS) if (a[k]) o[k] = a[k]; return o; };
 async function copyLater(promise, out, ok){
   try {
@@ -308,20 +312,28 @@ async function copyText(t, out, ok){
   catch(e){ msg(out, "Не удалось скопировать автоматически. Выделите текст и скопируйте вручную.", "err"); }
 }
 function renderWords(box, words){ box.innerHTML = ""; for (const w of words) box.appendChild(el("span", null, w)); box.hidden = false; }
+function addrRow(a, k, name, out){
+  const r = el("div","addr"); const b = el("button", null, "Копировать");
+  b.onclick = () => copyText(a[k], out, name + ": адрес скопирован.");
+  r.append(el("b", null, name), el("code", null, a[k]), b); return r;
+}
 function renderAddrs(box, a, out){
   box.innerHTML = "";
-  for (const [k,name] of NAMES){
-    if (!a[k]) continue;
-    const r = el("div","addr"); const b = el("button", null, "Копировать");
-    b.onclick = () => copyText(a[k], out, name + ": адрес скопирован.");
-    r.append(el("b", null, name), el("code", null, a[k]), b); box.appendChild(r);
+  for (const [k,name] of NAMES_MAIN) if (a[k]) box.appendChild(addrRow(a, k, name, out));
+  const more = NAMES_MORE.filter(([k]) => a[k]);
+  if (more.length){
+    const extra = el("div","more-addrs"); extra.hidden = true;
+    for (const [k,name] of more) extra.appendChild(addrRow(a, k, name, out));
+    const tg = el("button","btn small more-btn","Ещё монеты (" + more.length + ")");
+    tg.onclick = () => { extra.hidden = !extra.hidden; tg.textContent = extra.hidden ? "Ещё монеты (" + more.length + ")" : "Скрыть"; };
+    box.append(tg, extra);
   }
   box.hidden = false;
 }
 const fmtDate = ts => new Date(ts).toLocaleString("ru-RU", {day:"2-digit", month:"2-digit", year:"2-digit", hour:"2-digit", minute:"2-digit"});
 function shareText(w){
   return "🔐 " + w.label + " · " + fmtDate(w.t) + "\n\n" +
-    NAMES.filter(([k]) => w.a[k]).map(([k, n]) => n + ": " + w.a[k]).join("\n") + "\n\nСид (зашифрован):\n" + w.c;
+    NAMES_MAIN.filter(([k]) => w.a[k]).map(([k, n]) => n + ": " + w.a[k]).join("\n") + "\n\nСид (зашифрован):\n" + w.c;
 }
 
 function renderList(){
@@ -473,21 +485,14 @@ async function balXrp(addr){
   if (!r.account_data) throw new Error("xrp");
   return {xrp: Number(r.account_data.Balance) / 1e6};
 }
-async function balTon(addr){
-  const j = await getJSON("https://toncenter.com/api/v2/getAddressBalance?address=" + encodeURIComponent(addr));
-  let usdtT = 0;
-  try { const u = await getJSON("https://tonapi.io/v2/accounts/" + encodeURIComponent(addr) + "/jettons/EQCxE6mUtQJKFnGfaROTKOt1lZbDiiX1kCixRv7Nw2Id_sDs"); usdtT = Number(u.balance || 0) / 1e6; }
-  catch(e){ if (!String(e.message).includes("404")) throw e; }
-  return {ton: Number(j.result || 0) / 1e9, usdtT};
-}
 async function balAtom(addr){
   const j = await getJSON("https://cosmos-rest.publicnode.com/cosmos/bank/v1beta1/balances/" + addr);
   const u = (j.balances || []).find(x => x.denom === "uatom");
   return {atom: u ? Number(u.amount) / 1e6 : 0};
 }
 // курсы: CoinGecko id → ключ баланса; стейблкоины считаем по $1
-const CG = {btc:"bitcoin", sol:"solana", trx:"tron", eth:"ethereum", bnb:"binancecoin", ltc:"litecoin", doge:"dogecoin", xrp:"ripple", ton:"the-open-network", atom:"cosmos"};
-const STABLE = ["usdt","usdtE","usdcE","dai","usdtB","usdcB","usdtS","usdcS","usdtT"];
+const CG = {btc:"bitcoin", sol:"solana", trx:"tron", eth:"ethereum", bnb:"binancecoin", ltc:"litecoin", doge:"dogecoin", xrp:"ripple", atom:"cosmos"};
+const STABLE = ["usdt","usdtE","usdcE","dai","usdtB","usdcB","usdtS","usdcS"];
 async function prices(){
   const j = await getJSON("https://api.coingecko.com/api/v3/simple/price?ids=" + Object.values(CG).join(",") + "&vs_currencies=usd");
   const px = {}; for (const [k, id] of Object.entries(CG)) px[k] = j[id] && j[id].usd || 0;
@@ -513,7 +518,7 @@ function renderTotal(){
 const CHIPS_MAIN = [["usdt","USDT TRC20",2], ["trx","TRX",2], ["btc","BTC",8], ["sol","SOL",4]];
 const CHIPS_MORE = [["eth","ETH",6], ["bnb","BNB",6], ["usdtE","USDT ERC20",2], ["usdcE","USDC ERC20",2], ["dai","DAI",2],
   ["usdtB","USDT BEP20",2], ["usdcB","USDC BEP20",2], ["usdtS","USDT SOL",2], ["usdcS","USDC SOL",2],
-  ["ton","TON",4], ["usdtT","USDT TON",2], ["ltc","LTC",6], ["doge","DOGE",2], ["xrp","XRP",4], ["atom","ATOM",4]];
+  ["ltc","LTC",6], ["doge","DOGE",2], ["xrp","XRP",4], ["atom","ATOM",4]];
 function balChips(w){
   const b = bal.w[w.k], box = el("div","bals");
   if (!b){ box.appendChild(el("span","bal","Баланс: нажмите «Обновить балансы»")); return box; }
@@ -534,7 +539,7 @@ async function refreshBalances(){
     const jobs = [
       a.trx && balTron(a.trx), a.btc && balBtc(a.btc).then(v => ({btc: v})), a.sol && balSol(a),
       a.evm && balEvm("eth", a.evm), a.evm && balEvm("bsc", a.evm),
-      a.ton && balTon(a.ton), a.ltc && balLtc(a.ltc), a.doge && balDoge(a.doge), a.xrp && balXrp(a.xrp), a.atom && balAtom(a.atom)
+      a.ltc && balLtc(a.ltc), a.doge && balDoge(a.doge), a.xrp && balXrp(a.xrp), a.atom && balAtom(a.atom)
     ].filter(Boolean);
     const res = await Promise.allSettled(jobs);
     const cur = Object.assign({}, bal.w[w.k] || {});
@@ -614,7 +619,7 @@ async function onNotifyChange(){
 $("notifyBtc").onchange = onNotifyChange;
 $("notifyOther").onchange = onNotifyChange;
 // старые кошельки: досчитываем адреса новых монет (нужен пароль — адреса считаются из фразы)
-const NEW_KEYS = ["evm","ltc","doge","xrp","atom","ton"];
+const NEW_KEYS = ["evm","ltc","doge","xrp","atom"];
 let migrating = false;
 async function migrateEvm(){
   const pw = $("pw").value;
@@ -677,7 +682,7 @@ document.querySelectorAll(".chip[data-q]").forEach(c => c.onclick = () => setQ(p
 
 async function makeWallet(label, pw){
   const words = await entropyToMnemonic(crypto.getRandomValues(new Uint8Array(n === 12 ? 16 : 32)));
-  const a = SeedDerive.addresses(words.join(" ")); delete a.btcLegacy;
+  const a = SeedDerive.addresses(words.join(" ")); delete a.btcLegacy; delete a.ton;
   Object.assign(a, SeedDerive.solAtas(a.sol));
   a.btc = SeedDerive.btcAll(words.join(" "))[btcType];
   let t = Date.now(); while (wallets.some(x => x.t === t)) t++;
