@@ -43,6 +43,9 @@ button:disabled{opacity:.45;cursor:not-allowed}
 .words span::before{counter-increment:w;content:counter(w);color:var(--muted);font-size:11px;min-width:1.4em;text-align:right;font-variant-numeric:tabular-nums;padding-top:2px}
 .words.blur span{filter:blur(6px)}
 .empty{color:var(--muted);font-size:14px;margin:0}
+#archBox{border-top:1px dashed var(--line);padding-top:12px}
+#archBox[open] summary{margin-bottom:10px}
+.arch-note{color:var(--muted);font-size:13px;margin:0 0 10px}
 label{font-size:13px;color:var(--muted);display:grid;gap:4px}
 label.check{display:flex;gap:8px;align-items:center;color:var(--fg);font-size:14px}
 label.check input{width:auto}
@@ -306,9 +309,20 @@ async function copyLater(promise, out, ok){
   }
 }
 async function saveWallet(w){
-  await store.set(w.k, JSON.stringify({label:w.label, t:w.t, a:w.a, c:w.c, imp:!!w.imp, bt:w.bt || "native", watch:!!w.watch}));
+  await store.set(w.k, JSON.stringify({label:w.label, t:w.t, a:w.a, c:w.c, imp:!!w.imp, bt:w.bt || "native", watch:!!w.watch, arch:!!w.arch, keep:!!w.keep}));
 }
 let filter = "all";
+// архив: кошелёк старше недели, на котором меньше $5 (по последней проверке), или убранный вручную.
+// Балансы архива не загружаются при обновлении — поэтому список и сумма грузятся быстрее.
+const ARCH_DAYS = 7, ARCH_USD = 5;
+function isArch(w){
+  if (w.arch) return true;
+  if (w.keep) return false;
+  if (Date.now() - w.t < ARCH_DAYS * 864e5) return false;
+  const u = usdOf(bal.w[w.k]);
+  return u != null && u < ARCH_USD;          // баланс ещё ни разу не проверяли — не прячем
+}
+let archOpen = false;
 function matches(w, q){
   if (filter === "todo" && w.imp) return false;
   if (filter === "done" && !w.imp) return false;
@@ -367,8 +381,30 @@ function renderList(){
   }
   const q = $("q").value.trim();
   const shown = wallets.filter(w => matches(w, q));
-  if (!shown.length){ box.appendChild(el("p","empty", q ? "Ничего не найдено по «" + q + "»." : "В этом фильтре кошельков нет.")); return; }
-  for (const w of shown){
+  const act = shown.filter(w => !isArch(w)), arch = shown.filter(isArch);
+  const archAll = wallets.filter(isArch).length;
+  $("count").textContent = wallets.length ? (done + " из " + wallets.length + " в SafePal" + (archAll ? " · в архиве " + archAll : "")) : "";
+  if (!act.length) box.appendChild(el("p","empty", q ? "Ничего не найдено по «" + q + "»" + (arch.length ? " — смотрите в архиве." : ".") : (archAll && filter === "all" ? "Все кошельки в архиве." : "В этом фильтре кошельков нет.")));
+  for (const w of act) box.appendChild(walletCard(w));
+  if (arch.length){
+    const d = el("details"); d.id = "archBox"; d.open = archOpen || !!q;
+    const sm = el("summary", null, "🗄 Архив · " + arch.length);
+    const inner = el("div"); inner.style.cssText = "display:grid;gap:10px";
+    const fill = () => {
+      if (inner.dataset.ready) return; inner.dataset.ready = "1";
+      inner.appendChild(el("p","arch-note", "Старше " + ARCH_DAYS + " дней и меньше $" + ARCH_USD + ", или убраны вручную. Их балансы не грузятся при обычном обновлении — проверить можно кнопкой ниже. Если на кошельке появится $5 и больше, он сам вернётся в список."));
+      const ab = el("button","btn small","Проверить балансы архива"); ab.id = "archBtn";
+      ab.onclick = () => refreshBalances(wallets.filter(isArch), ab);
+      inner.appendChild(ab);
+      for (const w of arch) inner.appendChild(walletCard(w));   // карточки архива строим только при открытии
+    };
+    d.addEventListener("toggle", () => { archOpen = d.open; if (d.open) fill(); });
+    if (d.open) fill();
+    d.append(sm, inner); box.appendChild(d);
+  }
+}
+function walletCard(w){
+  {
     const card = el("article","wallet");
     const head = el("div","whead");
     const left = el("div","left");
@@ -431,9 +467,18 @@ function renderList(){
       try { await store.del(w.k); wallets = wallets.filter(x => x.k !== w.k); renderList(); syncWatch(); msg($("m2"), "Кошелёк удалён из списка. Сообщение в Telegram осталось.", "ok"); }
       catch(e){ msg(out, "Не получилось удалить, попробуйте ещё раз.", "err"); }
     };
-    row.append(show, cp, del);
+    const inArch = isArch(w);
+    const arc = el("button","btn small", inArch ? "Вернуть из архива" : "В архив");
+    arc.onclick = async () => {
+      const prev = [w.arch, w.keep];
+      if (inArch){ w.arch = false; w.keep = true; } else { w.arch = true; w.keep = false; }
+      try { await saveWallet(w); } catch(e){ [w.arch, w.keep] = prev; msg(out, "Не удалось сохранить, попробуйте ещё раз.", "err"); return; }
+      renderList();
+      msg($("m2"), inArch ? "«" + w.label + "» вернул в список — в архив сам больше не уйдёт." : "«" + w.label + "» убран в архив.", "ok");
+    };
+    row.append(show, cp, arc, del);
     card.append(head, wl, bl, ad, row, words, out);
-    box.appendChild(card);
+    return card;
   }
 }
 
@@ -566,14 +611,18 @@ function balChips(w){
   return box;
 }
 let balBusy = false;
-async function refreshBalances(){
-  if (balBusy || !wallets.length) return;
-  balBusy = true; $("balBtn").disabled = true;
+async function refreshBalances(list, btn){
+  if (!Array.isArray(list)) list = wallets.filter(w => !isArch(w));   // обычное обновление — без архива
+  btn = btn || $("balBtn");
+  const label = btn.textContent;
+  if (balBusy || !list.length) return;
+  balBusy = true; btn.disabled = true; $("balBtn").disabled = true;
+  const archBefore = wallets.filter(isArch).length;
   let errs = 0;
   try { bal.px = await prices(); } catch(e){ errs++; }
-  for (let i = 0; i < wallets.length; i++){
-    const w = wallets[i], a = w.a;
-    $("balBtn").textContent = "Загружаю " + (i+1) + " из " + wallets.length + "…";
+  for (let i = 0; i < list.length; i++){
+    const w = list[i], a = w.a;
+    btn.textContent = "Загружаю " + (i+1) + " из " + list.length + "…";
     const jobs = [
       a.trx && balTron(a.trx), a.btc && balBtc(a.btc).then(v => ({btc: v})), a.sol && balSol(a),
       a.evm && balEvm("eth", a.evm), a.evm && balEvm("bsc", a.evm),
@@ -583,14 +632,17 @@ async function refreshBalances(){
     const cur = Object.assign({}, bal.w[w.k] || {});
     for (const r of res) if (r.status === "fulfilled") Object.assign(cur, r.value); else errs++;
     bal.w[w.k] = cur;
-    if (i < wallets.length - 1) await sleep(350);
+    if (i < list.length - 1) await sleep(350);
   }
   bal.t = Date.now(); saveBal();
-  $("balBtn").textContent = "Обновить балансы"; $("balBtn").disabled = false; balBusy = false;
+  btn.textContent = label; btn.disabled = false; $("balBtn").disabled = false; balBusy = false;
   renderList();
-  msg($("m2"), errs ? "Часть данных не загрузилась (сервис не ответил) — показаны последние известные. Попробуйте обновить через минуту." : "", errs ? "err" : "ok");
+  const moved = wallets.filter(isArch).length - archBefore;
+  msg($("m2"), errs ? "Часть данных не загрузилась (сервис не ответил) — показаны последние известные. Попробуйте обновить через минуту."
+    : moved > 0 ? "В архив ушло кошельков: " + moved + " (старше " + ARCH_DAYS + " дней и меньше $" + ARCH_USD + ")."
+    : moved < 0 ? "Из архива вернулось кошельков: " + (-moved) + " — на них $" + ARCH_USD + " или больше." : "", errs ? "err" : "ok");
 }
-$("balBtn").onclick = refreshBalances;
+$("balBtn").onclick = () => refreshBalances();
 
 function openSafePal(out){
   let left = false;
