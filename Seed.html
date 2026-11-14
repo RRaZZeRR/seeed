@@ -97,6 +97,9 @@ progress{width:100%;height:6px;accent-color:var(--accent)}
 .pwstate{margin-left:auto;text-transform:none;letter-spacing:0;font-size:13px}
 .pwstate.ok{color:var(--ok)} .pwstate.no{color:var(--warn)}
 .bal.total{font-weight:700;color:var(--fg);border-color:var(--fg)}
+a.bal{text-decoration:none;cursor:pointer}
+.bal.stale{color:var(--warn);border-color:var(--warn);border-style:dashed}
+.bal-note{flex-basis:100%;color:var(--warn);font-size:12px}
 .more-btn{justify-self:start}
 .more-addrs{display:grid;gap:6px}
 label.watch{font-size:13px}
@@ -596,19 +599,46 @@ const CHIPS_MORE = [["eth","ETH",6], ["bnb","BNB",6], ["usdtE","USDT ERC20",2], 
 // баланс кошелька: сначала общий в $, рядом — каждая монета, на которой что-то есть, тоже в $
 const pxOf = k => bal.px && bal.px[k] != null ? bal.px[k] : (STABLE.includes(k) ? 1 : null);
 function fmtCoinUsd(v){ return v > 0 && v < 0.01 ? "<$0,01" : fmtUsd(v); }
+function openExplorer(url){ if (TG && TG.openLink) TG.openLink(url); else window.open(url, "_blank"); }
 function balChips(w){
   const b = bal.w[w.k], box = el("div","bals");
   if (!b){ box.appendChild(el("span","bal","Баланс: нажмите «Обновить балансы»")); return box; }
+  const failed = (bal.f && bal.f[w.k]) || [];
+  const staleSum = failed.some(n => NET[n].keys.some(k => b[k] > 0));
   const u = usdOf(b);
-  box.appendChild(el("span","bal total", u != null ? fmtUsd(u) : "—"));
+  box.appendChild(el("span","bal total" + (staleSum ? " stale" : ""), u != null ? (staleSum ? "≈ " : "") + fmtUsd(u) : "—"));
   for (const [k, n, d] of CHIPS_MAIN.concat(CHIPS_MORE)){
     const v = b[k]; if (!(v > 0)) continue;
-    const p = pxOf(k);
-    const c = el("span", "bal pos", n + " " + (p != null ? fmtCoinUsd(v * p) : fmtAmt(v, d)));
-    c.title = fmtAmt(v, d) + " " + n;
+    const p = pxOf(k), net = netOf(k), old = failed.includes(net);
+    // нажатие — адрес в обозревателе сети: там видно, что на нём на самом деле
+    const c = el("a", "bal pos" + (old ? " stale" : ""), (old ? "⚠ " : "") + n + " " + (p != null ? fmtCoinUsd(v * p) : fmtAmt(v, d)));
+    const addr = net && w.a[NET[net].addr];
+    if (addr){ c.href = NET[net].url + addr; c.onclick = (e) => { e.preventDefault(); openExplorer(c.href); }; }
+    c.title = fmtAmt(v, d) + " " + n + (old ? " — не обновилось, показано старое значение" : "") + " · открыть в обозревателе";
     box.appendChild(c);
   }
+  if (failed.length) box.appendChild(el("span","bal-note", "⚠ Не обновилось (" + failed.map(x => x.toUpperCase()).join(", ") + ") — сервис не ответил, показано последнее известное. Нажмите «Обновить балансы» ещё раз или на монету — откроется обозреватель."));
   return box;
+}
+// сети: какие монеты приходят одним запросом и где адрес посмотреть в обозревателе
+const NET = {
+  tron: {keys:["usdt","trx"], addr:"trx", url:"https://tronscan.org/#/address/"},
+  btc:  {keys:["btc"], addr:"btc", url:"https://mempool.space/address/"},
+  sol:  {keys:["sol","usdtS","usdcS"], addr:"sol", url:"https://solscan.io/account/"},
+  eth:  {keys:["eth","usdtE","usdcE","dai"], addr:"evm", url:"https://etherscan.io/address/"},
+  bsc:  {keys:["bnb","usdtB","usdcB"], addr:"evm", url:"https://bscscan.com/address/"},
+  ltc:  {keys:["ltc"], addr:"ltc", url:"https://litecoinspace.org/address/"},
+  doge: {keys:["doge"], addr:"doge", url:"https://blockchair.com/dogecoin/address/"},
+  xrp:  {keys:["xrp"], addr:"xrp", url:"https://xrpscan.com/account/"},
+  atom: {keys:["atom"], addr:"atom", url:"https://www.mintscan.io/cosmos/address/"}
+};
+const netOf = k => Object.keys(NET).find(n => NET[n].keys.includes(k));
+function balJobs(a){
+  return [
+    ["tron", a.trx && (() => balTron(a.trx))], ["btc", a.btc && (() => balBtc(a.btc).then(v => ({btc: v})))], ["sol", a.sol && (() => balSol(a))],
+    ["eth", a.evm && (() => balEvm("eth", a.evm))], ["bsc", a.evm && (() => balEvm("bsc", a.evm))],
+    ["ltc", a.ltc && (() => balLtc(a.ltc))], ["doge", a.doge && (() => balDoge(a.doge))], ["xrp", a.xrp && (() => balXrp(a.xrp))], ["atom", a.atom && (() => balAtom(a.atom))]
+  ].filter(x => x[1]);
 }
 let balBusy = false;
 async function refreshBalances(list, btn){
@@ -623,15 +653,19 @@ async function refreshBalances(list, btn){
   for (let i = 0; i < list.length; i++){
     const w = list[i], a = w.a;
     btn.textContent = "Загружаю " + (i+1) + " из " + list.length + "…";
-    const jobs = [
-      a.trx && balTron(a.trx), a.btc && balBtc(a.btc).then(v => ({btc: v})), a.sol && balSol(a),
-      a.evm && balEvm("eth", a.evm), a.evm && balEvm("bsc", a.evm),
-      a.ltc && balLtc(a.ltc), a.doge && balDoge(a.doge), a.xrp && balXrp(a.xrp), a.atom && balAtom(a.atom)
-    ].filter(Boolean);
-    const res = await Promise.allSettled(jobs);
-    const cur = Object.assign({}, bal.w[w.k] || {});
-    for (const r of res) if (r.status === "fulfilled") Object.assign(cur, r.value); else errs++;
+    const jobs = balJobs(a);
+    const res = await Promise.allSettled(jobs.map(([, f]) => f()));
+    const cur = Object.assign({}, bal.w[w.k] || {}), failed = [];
+    for (let j = 0; j < jobs.length; j++){
+      let r = res[j];
+      // сервис не ответил (часто — «слишком много запросов») — ещё одна попытка через пару секунд
+      if (r.status !== "fulfilled"){ await sleep(1500); try { r = {status:"fulfilled", value: await jobs[j][1]()}; } catch(e){} }
+      if (r.status === "fulfilled") Object.assign(cur, r.value);
+      else { failed.push(jobs[j][0]); errs++; }
+    }
     bal.w[w.k] = cur;
+    bal.f = bal.f || {};
+    if (failed.length) bal.f[w.k] = failed; else delete bal.f[w.k];
     if (i < list.length - 1) await sleep(350);
   }
   bal.t = Date.now(); saveBal();
