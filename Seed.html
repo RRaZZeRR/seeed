@@ -509,25 +509,32 @@ function tronHex20(addr){
   if (!hex.startsWith("41")) throw new Error("адрес");
   return hex.slice(2, 42);
 }
-// TRON: баланс берём прямо у узла сети (как кошелёк) — быстрый «список аккаунтов» TronGrid иногда показывает
-// давно выведенные USDT. Если узел не ответил — запасной путь через этот список.
-async function balTron(addr){
-  const post = (path, body) => getJSON("https://api.trongrid.io/wallet/" + path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(Object.assign({visible:true}, body))});
-  try {
-    const [acc, c] = await Promise.all([
-      post("getaccount", {address: addr}),
-      post("triggerconstantcontract", {owner_address: addr, contract_address: USDT_TRC20, function_selector: "balanceOf(address)", parameter: tronHex20(addr).padStart(64, "0")})
-    ]);
-    const h = c && Array.isArray(c.constant_result) && c.constant_result[0];
-    if (!(c && c.result && c.result.result) || typeof h !== "string" || !/^[0-9a-f]*$/i.test(h)) throw new Error("tron");
-    return {usdt: h ? Number(BigInt("0x" + h)) / 1e6 : 0, trx: ((acc && acc.balance) || 0) / 1e6};
-  } catch(e){
-    const j = await getJSON("https://api.trongrid.io/v1/accounts/" + addr);
-    if (!j.data || !j.data.length) return {usdt:0, trx:0};
-    const d = j.data[0]; let usdt = 0;
-    for (const o of (d.trc20 || [])) if (o[USDT_TRC20] != null) usdt = Number(o[USDT_TRC20]) / 1e6;
-    return {usdt, trx: (d.balance || 0) / 1e6};
+// TRON: один запрос на кошелёк — список аккаунтов TronGrid (TRX и USDT сразу). Этот список иногда показывает
+// давно выведенные USDT, поэтому если он видит USDT, сверяем сумму прямо с контрактом USDT в сети.
+// TronGrid без ключа быстро отвечает «слишком много запросов» — запросы к нему идут по одному с паузой.
+let tronLast = 0;
+async function tronGet(url, opt){
+  for (let i = 0; ; i++){
+    const wait = tronLast + 400 - Date.now(); if (wait > 0) await sleep(wait);
+    tronLast = Date.now();
+    try { return await getJSON(url, opt); }
+    catch(e){ if (i >= 2) throw e; await sleep(i ? 4000 : 2000); }
   }
+}
+async function tronUsdtOnChain(addr){
+  const c = await tronGet("https://api.trongrid.io/wallet/triggerconstantcontract", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({visible:true, owner_address: addr, contract_address: USDT_TRC20, function_selector: "balanceOf(address)", parameter: tronHex20(addr).padStart(64, "0")})});
+  const h = c && Array.isArray(c.constant_result) && c.constant_result[0];
+  if (!(c && c.result && c.result.result) || typeof h !== "string" || !/^[0-9a-f]*$/i.test(h)) throw new Error("tron");
+  return h ? Number(BigInt("0x" + h)) / 1e6 : 0;
+}
+async function balTron(addr){
+  const j = await tronGet("https://api.trongrid.io/v1/accounts/" + addr);
+  if (!j.data || !j.data.length) return {usdt:0, trx:0};
+  const d = j.data[0]; let usdt = 0;
+  for (const o of (d.trc20 || [])) if (o[USDT_TRC20] != null) usdt = Number(o[USDT_TRC20]) / 1e6;
+  if (usdt > 0) usdt = await tronUsdtOnChain(addr);       // сверка с сетью
+  return {usdt, trx: (d.balance || 0) / 1e6};
 }
 async function firstOk(fns){ let last; for (const f of fns){ try { return await f(); } catch(e){ last = e; } } throw last; }
 async function balBtc(addr){
