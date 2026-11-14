@@ -522,13 +522,26 @@ async function tronGet(url, opt){
   }
 }
 async function tronUsdtOnChain(addr){
-  const c = await tronGet("https://api.trongrid.io/wallet/triggerconstantcontract", {method:"POST", headers:{"Content-Type":"application/json"},
+  // text/plain — чтобы браузер не делал предварительный запрос, который TronGrid может не пропустить
+  const c = await tronGet("https://api.trongrid.io/wallet/triggerconstantcontract", {method:"POST", headers:{"Content-Type":"text/plain"},
     body: JSON.stringify({visible:true, owner_address: addr, contract_address: USDT_TRC20, function_selector: "balanceOf(address)", parameter: tronHex20(addr).padStart(64, "0")})});
   const h = c && Array.isArray(c.constant_result) && c.constant_result[0];
   if (!(c && c.result && c.result.result) || typeof h !== "string" || !/^[0-9a-f]*$/i.test(h)) throw new Error("tron");
   return h ? Number(BigInt("0x" + h)) / 1e6 : 0;
 }
+// TRON: сначала через свой сервер (бот) — он спрашивает узел сети напрямую: точные цифры, без отказов браузеру
+async function tronViaServer(addr){
+  if (!WORKER_URL || WORKER_URL.startsWith("__") || !TG || !TG.initData) return null;
+  try {
+    const j = await getJSON(WORKER_URL.replace(/\/$/, "") + "/tron", {method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({initData: TG.initData, addrs: [addr]})});
+    const v = j && j.ok && j.bal && j.bal[addr];
+    return v && typeof v.usdt === "number" && typeof v.trx === "number" ? {usdt: v.usdt, trx: v.trx} : null;
+  } catch(e){ return null; }
+}
 async function balTron(addr){
+  const v = await tronViaServer(addr);
+  if (v) return v;
   const j = await tronGet("https://api.trongrid.io/v1/accounts/" + addr);
   if (!j.data || !j.data.length) return {usdt:0, trx:0};
   const d = j.data[0]; let usdt = 0;
