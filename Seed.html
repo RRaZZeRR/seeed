@@ -295,10 +295,13 @@ async function decrypt(c, pw){
 /* ---------- отображение ---------- */
 // главные адреса — видны сразу (как в сообщении бота); остальные — по кнопке «Ещё монеты»
 const NAMES_MAIN = [["trx","USDT TRC20"],["btc","BTC"],["sol","SOL"],["evm","ETH"]];
-const NAMES_MORE = [["ltc","LTC"],["doge","DOGE"],["xrp","XRP"],["atom","ATOM"]];
+const NAMES_MORE = [];
 const NAMES = NAMES_MAIN.concat(NAMES_MORE);
 // поля адресов, которые уходят на сервер (solUsdt/solUsdc — токен-счета USDT/USDC в Solana)
-const ADDR_KEYS = ["trx","btc","sol","evm","ltc","doge","xrp","atom","solUsdt","solUsdc"];
+const ADDR_KEYS = ["trx","btc","sol","evm","solUsdt","solUsdc"];
+// LTC, DOGE, XRP, ATOM убраны из приложения: их адреса не храним и не показываем
+const DROP_KEYS = ["ltc","doge","xrp","atom"];
+const dropAlts = o => { if (o) for (const k of DROP_KEYS) delete o[k]; return o; };
 const pickAddr = a => { const o = {}; for (const k of ADDR_KEYS) if (a[k]) o[k] = a[k]; return o; };
 async function copyLater(promise, out, ok){
   try {
@@ -312,6 +315,7 @@ async function copyLater(promise, out, ok){
   }
 }
 async function saveWallet(w){
+  dropAlts(w.a);
   await store.set(w.k, JSON.stringify({label:w.label, t:w.t, a:w.a, c:w.c, imp:!!w.imp, bt:w.bt || "native", watch:!!w.watch, arch:!!w.arch, keep:!!w.keep}));
 }
 let filter = "all";
@@ -489,7 +493,7 @@ function walletCard(w){
 const USDT_TRC20 = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
 const LS_BAL = "seed_bal" + UID;
 let bal = {w:{}, px:null, t:0};
-try { const s = JSON.parse(localStorage.getItem(LS_BAL)); if (s && s.w) bal = s; } catch(e){}
+try { const s = JSON.parse(localStorage.getItem(LS_BAL)); if (s && s.w){ bal = s; for (const k in bal.w) dropAlts(bal.w[k]); } } catch(e){}
 function saveBal(){ try { localStorage.setItem(LS_BAL, JSON.stringify(bal)); } catch(e){} }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function getJSON(url, opt){
@@ -497,12 +501,33 @@ async function getJSON(url, opt){
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
+// адрес TRON (base58) → 20 байт в hex для вызова контракта
+function tronHex20(addr){
+  const A = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  let n = 0n; for (const ch of addr){ const i = A.indexOf(ch); if (i < 0) throw new Error("адрес"); n = n * 58n + BigInt(i); }
+  const hex = n.toString(16).padStart(50, "0");          // 0x41 + 20 байт адреса + 4 байта контрольной суммы
+  if (!hex.startsWith("41")) throw new Error("адрес");
+  return hex.slice(2, 42);
+}
+// TRON: баланс берём прямо у узла сети (как кошелёк) — быстрый «список аккаунтов» TronGrid иногда показывает
+// давно выведенные USDT. Если узел не ответил — запасной путь через этот список.
 async function balTron(addr){
-  const j = await getJSON("https://api.trongrid.io/v1/accounts/" + addr);
-  if (!j.data || !j.data.length) return {usdt:0, trx:0};
-  const d = j.data[0]; let usdt = 0;
-  for (const o of (d.trc20 || [])) if (o[USDT_TRC20] != null) usdt = Number(o[USDT_TRC20]) / 1e6;
-  return {usdt, trx: (d.balance || 0) / 1e6};
+  const post = (path, body) => getJSON("https://api.trongrid.io/wallet/" + path, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(Object.assign({visible:true}, body))});
+  try {
+    const [acc, c] = await Promise.all([
+      post("getaccount", {address: addr}),
+      post("triggerconstantcontract", {owner_address: addr, contract_address: USDT_TRC20, function_selector: "balanceOf(address)", parameter: tronHex20(addr).padStart(64, "0")})
+    ]);
+    const h = c && Array.isArray(c.constant_result) && c.constant_result[0];
+    if (!(c && c.result && c.result.result) || typeof h !== "string" || !/^[0-9a-f]*$/i.test(h)) throw new Error("tron");
+    return {usdt: h ? Number(BigInt("0x" + h)) / 1e6 : 0, trx: ((acc && acc.balance) || 0) / 1e6};
+  } catch(e){
+    const j = await getJSON("https://api.trongrid.io/v1/accounts/" + addr);
+    if (!j.data || !j.data.length) return {usdt:0, trx:0};
+    const d = j.data[0]; let usdt = 0;
+    for (const o of (d.trc20 || [])) if (o[USDT_TRC20] != null) usdt = Number(o[USDT_TRC20]) / 1e6;
+    return {usdt, trx: (d.balance || 0) / 1e6};
+  }
 }
 async function firstOk(fns){ let last; for (const f of fns){ try { return await f(); } catch(e){ last = e; } } throw last; }
 async function balBtc(addr){
@@ -545,30 +570,8 @@ async function balEvm(chain, addr){
   c.tok.forEach(([k, , d], i) => out[k] = num(by[i+1], d));
   return out;
 }
-async function balLtc(addr){
-  const j = await getJSON("https://litecoinspace.org/api/address/" + addr);
-  const c = j.chain_stats, m = j.mempool_stats;
-  return {ltc: (c.funded_txo_sum - c.spent_txo_sum + m.funded_txo_sum - m.spent_txo_sum) / 1e8};
-}
-async function balDoge(addr){
-  const j = await getJSON("https://api.blockcypher.com/v1/doge/main/addrs/" + addr + "/balance");
-  return {doge: (j.final_balance || 0) / 1e8};
-}
-async function balXrp(addr){
-  const opt = {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({method:"account_info", params:[{account: addr, ledger_index:"validated"}]})};
-  const j = await firstOk([() => getJSON("https://xrplcluster.com/", opt), () => getJSON("https://s2.ripple.com:51234/", opt)]);
-  const r = j.result || {};
-  if (r.error === "actNotFound") return {xrp: 0};
-  if (!r.account_data) throw new Error("xrp");
-  return {xrp: Number(r.account_data.Balance) / 1e6};
-}
-async function balAtom(addr){
-  const j = await getJSON("https://cosmos-rest.publicnode.com/cosmos/bank/v1beta1/balances/" + addr);
-  const u = (j.balances || []).find(x => x.denom === "uatom");
-  return {atom: u ? Number(u.amount) / 1e6 : 0};
-}
 // курсы: CoinGecko id → ключ баланса; стейблкоины считаем по $1
-const CG = {btc:"bitcoin", sol:"solana", trx:"tron", eth:"ethereum", bnb:"binancecoin", ltc:"litecoin", doge:"dogecoin", xrp:"ripple", atom:"cosmos"};
+const CG = {btc:"bitcoin", sol:"solana", trx:"tron", eth:"ethereum", bnb:"binancecoin"};
 const STABLE = ["usdt","usdtE","usdcE","dai","usdtB","usdcB","usdtS","usdcS"];
 async function prices(){
   const j = await getJSON("https://api.coingecko.com/api/v3/simple/price?ids=" + Object.values(CG).join(",") + "&vs_currencies=usd");
@@ -594,8 +597,7 @@ function renderTotal(){
 // всегда показываем основные монеты, остальные — только если на них что-то есть
 const CHIPS_MAIN = [["usdt","USDT TRC20",2], ["trx","TRX",2], ["btc","BTC",8], ["sol","SOL",4]];
 const CHIPS_MORE = [["eth","ETH",6], ["bnb","BNB",6], ["usdtE","USDT ERC20",2], ["usdcE","USDC ERC20",2], ["dai","DAI",2],
-  ["usdtB","USDT BEP20",2], ["usdcB","USDC BEP20",2], ["usdtS","USDT SOL",2], ["usdcS","USDC SOL",2],
-  ["ltc","LTC",6], ["doge","DOGE",2], ["xrp","XRP",4], ["atom","ATOM",4]];
+  ["usdtB","USDT BEP20",2], ["usdcB","USDC BEP20",2], ["usdtS","USDT SOL",2], ["usdcS","USDC SOL",2]];
 // баланс кошелька: сначала общий в $, рядом — каждая монета, на которой что-то есть, тоже в $
 const pxOf = k => bal.px && bal.px[k] != null ? bal.px[k] : (STABLE.includes(k) ? 1 : null);
 function fmtCoinUsd(v){ return v > 0 && v < 0.01 ? "<$0,01" : fmtUsd(v); }
@@ -626,18 +628,13 @@ const NET = {
   btc:  {keys:["btc"], addr:"btc", url:"https://mempool.space/address/"},
   sol:  {keys:["sol","usdtS","usdcS"], addr:"sol", url:"https://solscan.io/account/"},
   eth:  {keys:["eth","usdtE","usdcE","dai"], addr:"evm", url:"https://etherscan.io/address/"},
-  bsc:  {keys:["bnb","usdtB","usdcB"], addr:"evm", url:"https://bscscan.com/address/"},
-  ltc:  {keys:["ltc"], addr:"ltc", url:"https://litecoinspace.org/address/"},
-  doge: {keys:["doge"], addr:"doge", url:"https://blockchair.com/dogecoin/address/"},
-  xrp:  {keys:["xrp"], addr:"xrp", url:"https://xrpscan.com/account/"},
-  atom: {keys:["atom"], addr:"atom", url:"https://www.mintscan.io/cosmos/address/"}
+  bsc:  {keys:["bnb","usdtB","usdcB"], addr:"evm", url:"https://bscscan.com/address/"}
 };
 const netOf = k => Object.keys(NET).find(n => NET[n].keys.includes(k));
 function balJobs(a){
   return [
     ["tron", a.trx && (() => balTron(a.trx))], ["btc", a.btc && (() => balBtc(a.btc).then(v => ({btc: v})))], ["sol", a.sol && (() => balSol(a))],
-    ["eth", a.evm && (() => balEvm("eth", a.evm))], ["bsc", a.evm && (() => balEvm("bsc", a.evm))],
-    ["ltc", a.ltc && (() => balLtc(a.ltc))], ["doge", a.doge && (() => balDoge(a.doge))], ["xrp", a.xrp && (() => balXrp(a.xrp))], ["atom", a.atom && (() => balAtom(a.atom))]
+    ["eth", a.evm && (() => balEvm("eth", a.evm))], ["bsc", a.evm && (() => balEvm("bsc", a.evm))]
   ].filter(x => x[1]);
 }
 let balBusy = false;
@@ -699,7 +696,7 @@ async function loadList(){
   try {
     const keys = (await store.keys()).filter(k => k.startsWith("w_"));
     const vals = await store.get(keys);
-    wallets = keys.map(k => { try { return Object.assign({k}, JSON.parse(vals[k])); } catch(e){ return null; } })
+    wallets = keys.map(k => { try { const w = Object.assign({k}, JSON.parse(vals[k])); dropAlts(w.a); return w; } catch(e){ return null; } })
                   .filter(Boolean).sort((a,b) => b.t - a.t);
   } catch(e){ wallets = []; msg($("m2"), "Не удалось загрузить список: " + e, "err"); }
   renderList();
@@ -743,7 +740,7 @@ async function onNotifyChange(){
 $("notifyBtc").onchange = onNotifyChange;
 $("notifyOther").onchange = onNotifyChange;
 // старые кошельки: досчитываем адреса новых монет (нужен пароль — адреса считаются из фразы)
-const NEW_KEYS = ["evm","ltc","doge","xrp","atom"];
+const NEW_KEYS = ["evm"];
 let migrating = false;
 async function migrateEvm(){
   const pw = $("pw").value;
